@@ -6,6 +6,16 @@
 
 Miki is a privacy-first, locally-run personal AI assistant that remembers who you are, tracks your schedule, manages your emails, and connects to your phone via Telegram. Rather than acting as a stateless chatbot, Miki continuously builds a long-term **knowledge graph** of your life using an Obsidian-backed memory store and a Retrieval-Augmented Generation (RAG) pipeline.
 
+## 🎬 Demo
+
+<p align="center">
+  <a href="assets/demo/miki-demo.mp4">
+    <img src="assets/demo/miki-demo.gif" alt="Miki demo: graph memory, RAG and calendar management" width="100%">
+  </a>
+  <br>
+  <sub>Graph memory, RAG and calendar management in 50 seconds. <a href="assets/demo/miki-demo.mp4">Watch the full video with sound</a>. (Names and data in the demo are fictional.)</sub>
+</p>
+
 ---
 
 ## ✨ Key Features

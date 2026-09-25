@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Miki</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body data-state="idle">
+
+    <div class="grid"></div>
+    <div id="spot"></div>
+
+    <!-- Top bar -->
+    <header class="panel topbar">
+        <div class="brand">
+            <div class="mark"></div>
+            <div class="wordmark">miki</div>
+            <div class="tagline">personal assistant</div>
+        </div>
+        <div class="top-right">
+            <div class="chip" id="model-chip" title="Change model (/model)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></svg>
+                <span id="model-name">—</span>
+            </div>
+            <div class="pill" id="pill-memory"><span class="dot"></span><span class="pill-text">Memory</span></div>
+            <div class="pill" id="pill-phone" hidden><span class="dot"></span><span class="pill-text">Phone</span></div>
+            <div class="pill" id="pill-calendar"><span class="dot"></span><span class="pill-text">Calendar</span></div>
+            <div class="clock" id="clock">--:--</div>
+        </div>
+    </header>
+
+    <div class="layout">
+
+        <!-- Left column -->
+        <aside class="side">
+            <section class="panel core">
+                <div class="orb">
+                    <svg viewBox="0 0 180 180" aria-hidden="true">
+                        <g id="bezel"></g>
+                        <circle cx="90" cy="90" r="62" fill="none" stroke="rgba(236,232,223,0.09)" stroke-width="1"/>
+                    </svg>
+                    <svg class="sweep" viewBox="0 0 180 180" aria-hidden="true">
+                        <path d="M 90 20 A 70 70 0 0 1 151.6 55" fill="none" stroke="#ff5b2e" stroke-width="2" stroke-linecap="round"/>
+                        <circle cx="151.6" cy="55" r="3" fill="#ff5b2e"/>
+                    </svg>
+                    <canvas id="pixel-face" width="224" height="224"></canvas>
+                </div>
+                <canvas id="scope" width="480" height="68"></canvas>
+                <div class="status-line"><span class="dot"></span><span id="voice-state">Online · Ready</span></div>
+                <div class="greeting">
+                    <h2 id="greeting">Hello.</h2>
+                    <p id="date-line"></p>
+                </div>
+                <div class="day">
+                    <div class="day-track"><div class="day-fill" id="day-fill"></div></div>
+                    <div class="day-labels"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+                    <div class="day-pct"><span>DAY ELAPSED</span><b id="day-pct">0%</b></div>
+                </div>
+            </section>
+
+            <section class="panel widget">
+                <div class="w-head" data-idx="01">WEATHER</div>
+                <div id="weather-content"><div class="skeleton"></div><div class="skeleton short"></div></div>
+            </section>
+
+            <section class="panel widget">
+                <div class="w-head" data-idx="02">MAPS</div>
+                <div id="maps-content"><div class="skeleton"></div></div>
+            </section>
+        </aside>
+
+        <!-- Chat -->
+        <main class="panel chat">
+            <div class="chat-head"><span>CONVERSATION</span><span>MODEL / <b id="model-inline">—</b></span></div>
+
+            <div id="chat-log">
+                <div class="hero" id="hero">
+                    <h1>How can I <em>help</em>?</h1>
+                    <p>Your calendar, mail, files and memory, one conversation away.</p>
+                    <div class="suggestions">
+                        <button class="suggestion" data-prompt="What's on my calendar today?"><i>01</i>What's on today?</button>
+                        <button class="suggestion" data-prompt="Do I have any unread emails?"><i>02</i>Check my mail</button>
+                        <button class="suggestion" data-prompt="What's the weather like today?"><i>03</i>Today's weather</button>
+                        <button class="suggestion" data-prompt="What do you remember about me?"><i>04</i>What do you remember?</button>
+                        <button class="suggestion" data-prompt="/model"><i>05</i>Change model</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="composer">
+                <div id="slash-menu"></div>
+                <form id="chat-form" autocomplete="off">
+                    <input type="text" id="chat-input" placeholder="Ask Miki anything, or type / for commands" autocomplete="off" spellcheck="false">
+                    <button type="submit" class="send" id="send-btn" aria-label="Send">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                    </button>
+                </form>
+                <div class="hint"><kbd>ENTER</kbd> send &nbsp;/&nbsp; <kbd>/</kbd> commands &nbsp;/&nbsp; <kbd>CTRL K</kbd> focus &nbsp;/&nbsp; <kbd>/model</kbd> to save cost</div>
+            </div>
+        </main>
+
+        <!-- Right column -->
+        <aside class="side">
+            <section class="panel widget">
+                <div class="w-head" data-idx="03">TODAY</div>
+                <div id="calendar-content"><div class="skeleton"></div><div class="skeleton short"></div><div class="skeleton"></div></div>
+            </section>
+
+            <section class="panel widget">
+                <div class="w-head" data-idx="04">NEEDS ATTENTION<span class="badge" id="mail-count"></span></div>
+                <div id="mail-content"><div class="skeleton"></div><div class="skeleton short"></div><div class="skeleton"></div></div>
+            </section>
+
+            <section class="panel widget">
+                <div class="w-head" data-idx="05">DRIVE</div>
+                <div id="drive-content"><div class="skeleton"></div><div class="skeleton short"></div></div>
+            </section>
+
+            <section class="panel widget brain">
+                <div class="w-head" data-idx="06">BRAIN</div>
+                <div class="brain-wrap">
+                    <canvas id="brain-canvas" width="10" height="10"></canvas>
+                    <div id="brain-tip"></div>
+                </div>
+                <div class="brain-stats" id="brain-stats">Loading…</div>
+            </section>
+        </aside>
+
+    </div>
+
+    <footer class="statusbar">
+        <div>
+            <span class="live"><b>●</b> ONLINE</span>
+            <span>MODEL <b id="sb-model">—</b></span>
+            <span>MEMORY <b id="sb-mem">—</b></span>
+        </div>
+        <div>
+            <span>LAST REPLY <b id="sb-lat">—</b></span>
+            <span>MESSAGES <b id="sb-msgs">0</b></span>
+            <span>UPTIME <b id="sb-up">0m</b></span>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

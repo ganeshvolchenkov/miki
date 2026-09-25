@@ -1,0 +1,31 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+*.egg-info/
+data/
+.vscode/
+
+# Google Calendar OAuth secrets -- never commit these (also covered by
+# data/ above for the default paths, kept explicit in case of custom paths).
+credentials.json
+token.json
+# Personal / runtime data
+obsidian/
+vault/
+test_vault/
+reports/
+.agents/
+
+
+# Scratch scripts
+FEATURE_TEST_COMMANDS.py
+FINAL_STATUS.txt
+fix.py
+list_cals.py
+make_seamless.py
+test_cli_features.py
+skills-lock.json
+

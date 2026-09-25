@@ -1,0 +1,26 @@
+[project]
+name = "miki"
+version = "0.8.0"
+description = "Miki v0.1 — initial scaffolding for a personal AI assistant"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+calendar = [
+    "google-api-python-client>=2.100.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

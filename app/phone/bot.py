@@ -46,6 +46,7 @@ COMMANDS = [
     ("mail", "Emails that need your attention"),
     ("today", "Your calendar"),
     ("brief", "Your day in one message"),
+    ("focus", "Start a focus session"),
     ("memory", "What I remember about you"),
     ("profile", "Who I think you are"),
     ("interview", "Let me get to know you"),
@@ -56,6 +57,9 @@ COMMANDS = [
 ]
 
 _SCREEN_COMMANDS = {"home", "mail", "today", "brief", "profile", "add", "settings", "model", "help"}
+_FOCUS_STOP_WORDS = {"stop", "end", "off", "quit", "cancel"}
+_GOAL_DONE_WORDS = {"done", "finished", "reached", "yes"}  # /focus done: I got my goal done
+_GOAL_NOT_DONE_WORDS = {"notyet", "not", "unfinished", "no"}
 _MESSAGE_ID = re.compile(r"[0-9a-fA-F]{6,32}")
 _NOT_MODIFIED = "not modified"
 _HOME_BUTTON = [[{"text": "🏠 Home", "callback_data": "nav:home"}]]
@@ -77,7 +81,9 @@ class PhoneBot:
         quiet_default: str = "23:00-08:00",
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
+        focus: Any = None,
     ) -> None:
+        self.focus = focus  # the FocusService, if focus mode is available
         self.api = api
         self.state = state
         self.backend = backend
@@ -238,6 +244,8 @@ class PhoneBot:
         if command in {"start", "menu"}:
             self._send(chat_id, ui.welcome_text(self.state.owner_name or "you"), mode="html", reply_markup=ui.REPLY_KEYBOARD)
             self._open(chat_id, "home")
+        elif command == "focus":
+            self._focus_command(chat_id, argument)
         elif command == "unlink":
             self.state.unpair()
             self.hooks.on_state()
@@ -256,6 +264,92 @@ class PhoneBot:
                 self._send(chat_id, self._backend_text(command, argument), mode="plain")
         else:
             self._send(chat_id, f"I don't know /{command}. Try /help.", mode="plain")
+
+    # ------------------------------------------------------------------ focus mode
+    def _focus_command(self, chat_id: int, argument: str) -> None:
+        """/focus [how long[, goal] | stop | status | today | stats | habits | more [how long] | goal <x> | done | notyet | banned | ban <x> | unban <x> | menu]"""
+        if self.focus is None:
+            self._send(chat_id, "Focus mode isn't available on this computer.", mode="plain")
+            return
+        word, _, rest = argument.strip().partition(" ")
+        word, rest = word.lower(), rest.strip()
+        if word in _FOCUS_STOP_WORDS:
+            self._focus_reply(chat_id, self.focus.stop())
+        elif word in {"status", "menu", "screen"}:
+            self._open(chat_id, "focus")
+        elif word == "stats":
+            self._send(chat_id, self.focus.stats_text(), mode="plain")
+        elif word == "today":
+            self._send(chat_id, self.focus.today_text(), mode="plain")
+        elif word in {"habits", "habit", "routine"}:
+            with self._typing(chat_id):
+                text = self.focus.habits_text(reset=rest.lower() == "reset")
+            self._send(chat_id, text, mode="plain")
+        elif word in {"banned", "bans", "sites", "list"}:
+            self._send(chat_id, self.focus.banned_text(), mode="plain")
+        elif word in {"ban", "block"}:
+            self._focus_reply(chat_id, self.focus.ban(rest), buttons=False)
+        elif word in {"unban", "allow"}:
+            self._focus_reply(chat_id, self.focus.unban(rest), buttons=False)
+        elif word in {"more", "extend", "+"}:
+            with self._typing(chat_id):  # a strange duration may be read by the AI, which takes a moment
+                reply = self.focus.extend_from_text(rest)
+            self._focus_reply(chat_id, reply)
+        elif word == "goal" or word in _GOAL_DONE_WORDS or word in _GOAL_NOT_DONE_WORDS:
+            self._focus_reply(chat_id, self.focus.set_goal(rest) if word == "goal" else self.focus.goal_result(word in _GOAL_DONE_WORDS))
+        else:  # "/focus", "/focus 45", "/focus 1 hour", "/focus half an hour", "/focus until 3pm" ...
+            with self._typing(chat_id):
+                reply = self.focus.start_from_text(argument)
+            self._focus_reply(chat_id, reply)
+
+    def _focus_reply(self, chat_id: int, reply: Any, *, buttons: bool = True) -> None:
+        markup = ui.focus_buttons(self.focus.view()["phase"], self.focus.config.minutes) if buttons else None
+        self._send(chat_id, ("🎯 " if reply.ok and buttons else "") + reply.text, mode="plain", buttons=markup)
+
+    def _focus_callback(self, chat_id: int, message_id: int | None, rest: str) -> str:
+        if self.focus is None:
+            return "Focus mode isn't available"
+        action, _, arg = rest.partition(":")
+        if action in {"start", "more"}:
+            if action == "start":
+                reply = self.focus.start_focus(int(arg) if arg.isdigit() else None)
+            else:
+                reply = self.focus.extend(int(arg) if arg.isdigit() else 15)
+            self._clear_buttons(chat_id, message_id)
+            self._focus_reply(chat_id, reply)
+            return "" if reply.ok else "Couldn't do that"
+        if action == "stop":
+            if self.focus.is_focusing:  # ending early takes a second tap
+                self._show(chat_id, ui.focus_stop_confirm(), message_id)
+                return ""
+            action = "stopy"
+        if action == "stopy":
+            reply = self.focus.stop()
+            self._clear_buttons(chat_id, message_id)
+            self._send(chat_id, reply.text, mode="plain")
+        elif action == "status":
+            self._open(chat_id, "focus", edit_id=message_id)
+        elif action == "stats":
+            self._send(chat_id, self.focus.stats_text(), mode="plain")
+        elif action == "today":
+            self._send(chat_id, self.focus.today_text(), mode="plain")
+        elif action == "habits":
+            self._send(chat_id, self.focus.habits_text(), mode="plain")
+        elif action == "banned":
+            self._send(chat_id, self.focus.banned_text(), mode="plain")
+        elif action == "goal":
+            reply = self.focus.goal_result(arg == "yes")
+            self._clear_buttons(chat_id, message_id)
+            self._focus_reply(chat_id, reply)
+            return "" if reply.ok else "Nothing to check"
+        elif action == "done":
+            self._clear_buttons(chat_id, message_id)
+            return "Nice work today"
+        return ""
+
+    def _clear_buttons(self, chat_id: int, message_id: int | None) -> None:
+        if message_id is not None:
+            self.api.remove_buttons(chat_id, message_id)
 
     def _backend_text(self, command: str, argument: str) -> str:
         return self.backend.command(command, argument) or "I couldn't do that."
@@ -300,6 +394,10 @@ class PhoneBot:
             return ui.add_screen()
         if name == "help":
             return ui.help_screen()
+        if name == "focus":
+            if self.focus is None:
+                return ui.Screen("🎯 Focus mode isn't available on this computer.", _HOME_BUTTON)
+            return ui.focus_screen(self.focus.view())
         if name == "brief":
             return self._brief_screen()
         raise ValueError(f"unknown screen {name}")
@@ -451,7 +549,7 @@ class PhoneBot:
             name = "memory" if name == "mem" else name
             if name == "mail":
                 self._open(chat_id, "mail")
-            elif name in {"home", "today", "memory", "profile", "settings", "model", "add"}:
+            elif name in {"home", "today", "memory", "profile", "settings", "model", "add", "focus"}:
                 self._open(chat_id, name, arg, edit_id=message_id)
             return ""
         if kind in {"mem", "memf", "memy"}:
@@ -471,6 +569,8 @@ class PhoneBot:
             if rest in actions:
                 self._interview_step(chat_id, actions[rest])
             return ""
+        if kind == "fc":
+            return self._focus_callback(chat_id, message_id, rest)
         if kind == "cf" and rest in {"yes", "no"}:
             if message_id is not None:
                 self.api.remove_buttons(chat_id, message_id)

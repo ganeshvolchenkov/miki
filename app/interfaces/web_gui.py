@@ -20,6 +20,7 @@ from app.core.timeutil import local_utc_offset
 from app.core.interview import Interview
 from app.core.mail_attention import MailAttention, MailUnavailable
 from app.phone.backend import PhoneHooks
+from app.focus.service import FocusService, build_focus_service
 from app.phone.service import PhoneService, build_phone_service
 from app.core.mail_triage import MailTriage, gmail_url
 from app.interfaces import memory_commands as mc
@@ -56,6 +57,7 @@ class WebApi:
         self._triage: MailTriage | None = None
         self._core_lock = threading.RLock()  # the core handles one conversation turn at a time (dashboard or phone)
         self._phone: PhoneService | None = None
+        self._focus: FocusService | None = None
         self._mail = MailAttention(lambda name: self._core.get_tool(name), lambda: self._get_triage())
 
     def start_loops(self):
@@ -63,6 +65,7 @@ class WebApi:
         threading.Thread(target=self._update_widgets_loop, daemon=True).start()
         threading.Thread(target=self._startup_maintenance, daemon=True).start()
         self._push_model()
+        self._start_focus()
         self._start_phone()
 
     # ---- JS helpers -------------------------------------------------
@@ -149,6 +152,23 @@ class WebApi:
             self._js(f"setPill('phone', true, {json.dumps('Phone: ' + (status.owner or 'linked'))})")
         else:
             self._js("setPill('phone', false, 'Phone: not linked')")
+
+    # ---- focus mode ---------------------------------------------------------------------
+    def _start_focus(self) -> None:
+        """Start the focus clock (and resume a round that was running); its timers show up as chat lines."""
+        if self._focus is None:
+            return
+        self._focus.add_listener(lambda event: self._system(event.text))
+        try:
+            self._focus.start()
+        except Exception:
+            logger.exception("Focus service failed to start")
+
+    def _command_focus(self, argument: str) -> None:
+        if self._focus is None:
+            self._system("Focus mode isn't available here (it needs Windows and Google Chrome).")
+            return
+        self._system(self._focus.command(argument))
 
     def _command_phone(self, argument: str) -> None:
         phone = self._phone
@@ -260,6 +280,8 @@ class WebApi:
             self._run_background(self._mail_command)
         elif command == "phone":
             self._command_phone(argument)
+        elif command == "focus":
+            self._command_focus(argument)
         elif command == "forget" and manager is not None:
             self._system(mc.forget(self._core, argument))
             self._update_widgets()
@@ -282,6 +304,7 @@ class WebApi:
                 "/forget <word|id>   delete a memory\n"
                 "/mail               the emails that need your attention, and why\n"
                 "/phone              link Miki to your phone (Telegram)\n"
+                "/focus [1 hour|50 min, finish lecture 6|stop] study mode: Gemini + Claude on your screens, distractions blocked, a break, a daily recap (also /focus today, /focus habits)\n"
                 "/profile [refresh]  who I think you are, and what I don't know yet\n"
                 "/interview          I ask you questions to get to know you (skip / stop anytime)\n"
                 "/brain              how connected my memory is\n"
@@ -736,8 +759,9 @@ def run_gui() -> int:
     core, brain = runtime.core, runtime.brain
 
     api = WebApi(core, brain)
+    api._focus = build_focus_service(core=core)
     api._phone = build_phone_service(
-        core, runtime.settings, openai_client=runtime.openai_client, lock=api._core_lock, hooks=api.phone_hooks()
+        core, runtime.settings, openai_client=runtime.openai_client, lock=api._core_lock, hooks=api.phone_hooks(), focus=api._focus
     )
     window = webview.create_window(
         'Miki Command Center',

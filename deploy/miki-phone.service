@@ -1,0 +1,15 @@
+[Unit]
+Description=Miki phone service (Telegram bot + memory brain)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/miki
+ExecStart=%h/miki/.venv/bin/python -m app.headless
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

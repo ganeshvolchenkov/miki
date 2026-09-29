@@ -96,6 +96,32 @@ A real Telegram bot, not just a chat window:
 - **Quiet hours** and rate limits so it never spams you.
 - **Locked to you.** Pair once with a one-time code. Group chats and unlinked accounts are ignored.
 
+### 🎯 Focus mode
+Text Miki `/focus` (from your phone or the dashboard) and she sets your desk up for studying:
+
+- **Screens arranged for you.** Gemini on Screen 1, Claude on Screen 2, in a Chrome that Miki can see into. Everything else is tucked away.
+- **A ban list, not a straitjacket.** YouTube, TikTok, Instagram, Reddit, Netflix, Discord, Steam and friends are banned; everything else (your editor, notes, PDFs, Wikipedia) is left alone. Banned tabs are closed, banned apps minimised, and an everyday browser window showing a banned site is minimised too. Nothing is ever killed and no system setting changes, so if Miki stops you are instantly free.
+- **A little pixel Miki as a progress bar.** It stands on a slim bar along the bottom of your primary screen, which fills from the left corner to the right corner over the round: when Miki reaches the right corner, you're done. It stays put and only reacts when you wander off ("Nope, YouTube can wait!") and when you finish. **Click it to open the snipping tool** and grab a screenshot (right-click shows the time left). It runs as its own ~30 MB process.
+- **A break after an hour.** Miki pings your phone and desktop, lifts the lock for 5 minutes, then asks about another round. Urgent-mail pushes wait until you are done.
+- **Say how long in plain words.** `/focus 1 hour`, `/focus 30 mins`, `/focus 1h30`, `/focus half an hour`. Common forms are read instantly and offline; for anything stranger (`/focus until 3pm`, `/focus a pomodoro`) Miki asks the AI, tells you what it understood, and checks the answer is between 5 minutes and 4 hours.
+- **An end-of-day recap.** Each evening (21:00 by default, only on days you focused) Miki tells you how long you focused, when you started, when you finished, every round, what she bounced, and how that compares with your usual. Ask any time with `/focus today`.
+- **She learns how you study.** A single "Study habits" memory in your Obsidian brain is updated in place after every round (typical start and finish, usual round length, best time of day, your biggest distractions, streak), and a `<day> focus.md` note lands in the vault's Journal folder so you can ask "how much did I study last Tuesday?". Patterns are only claimed with a few days of evidence. Delete the memory and Miki stops (`/focus habits reset` restarts it).
+- **Always know what is blocked.** `/focus banned` lists every banned site and app.
+- **Stats.** Distractions bounced, focus minutes today and a day streak.
+
+Commands: `/focus` · `/focus 1 hour` · `/focus 30 mins` · `/focus more [half an hour]` · `/focus stop` · `/focus status` · `/focus today` · `/focus stats` · `/focus habits` · `/focus banned` · `/focus ban <site or app>` · `/focus unban <site or app>`. Banning is always allowed; lifting a ban only works between sessions, so you can't talk yourself out of focus mid-round.
+
+On the first run, sign in to Gemini and Claude once in the Chrome window Miki opens (it uses its own profile in `data/focus-chrome`, so your everyday Chrome is untouched). Settings live in `.env`:
+
+| Setting | Meaning |
+|---|---|
+| `MIKI_FOCUS_BAN=9anime.to,obsidian` | Extra bans: a name with a dot is a website, anything else is a program |
+| `MIKI_FOCUS_MINUTES=60` / `MIKI_FOCUS_BREAK_MINUTES=5` | Default round and break length |
+| `MIKI_FOCUS_RECAP_TIME=21:00` | When the end-of-day recap goes out (`off` to disable) |
+| `MIKI_FOCUS_SCREEN1_URL` / `MIKI_FOCUS_SCREEN2_URL` | What opens on each screen |
+| `MIKI_FOCUS_SWAP_SCREENS=1` | Swap which monitor is "Screen 1" (default: the primary one) |
+| `MIKI_CHROME_PATH`, `MIKI_FOCUS=0` | Chrome location; switch focus mode off |
+
 ### 🖥️ A dashboard worth looking at
 A lightweight, futuristic Command Center: animated pixel mascot, an interactive memory map, and live widgets for Calendar, Mail, Weather, Maps and Drive. Built to stay light: idle animations are gated so a resting dashboard uses almost no CPU.
 
@@ -209,6 +235,7 @@ python -m app.headless --remove-autostart   # remove from startup
 | `/weather [place]` | Instant weather |
 | `/model` | Switch the OpenAI model on the fly to control cost |
 | `/phone` | Pair Miki with your phone |
+| `/focus [minutes\|stop]` | Study mode: screens set up, distractions blocked, a break after an hour |
 
 Or just talk to her. Slash commands are optional.
 

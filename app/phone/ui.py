@@ -9,6 +9,7 @@ Callback data scheme (Telegram allows 64 bytes):
     md:<mail id> | mz:<mail id>                                dismiss / snooze an email
     set:urgent | set:brief | set:voice | set:quiet:<preset> | set:btime:<HHMM>
     model:<index> | iv:start | iv:skip | iv:stop | cf:yes | cf:no | ask:<event|remember|chat> | tts:<key>
+    nav:focus | fc:start:<minutes> | fc:more:<minutes> | fc:goal:yes | fc:goal:no | fc:stop | fc:stopy | fc:status | fc:stats | fc:today | fc:habits | fc:banned | fc:done
 """
 
 from __future__ import annotations
@@ -30,13 +31,14 @@ REPLY_KEYBOARD: dict[str, Any] = {
     "keyboard": [
         [{"text": "📬 Mail"}, {"text": "📅 Today"}, {"text": "🧠 Memory"}],
         [{"text": "🏠 Home"}, {"text": "➕ Add"}, {"text": "⚙️ Settings"}],
+        [{"text": "🎯 Focus"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
     "input_field_placeholder": "Message Miki…",
 }
 KEYBOARD_LABELS: dict[str, str] = {
-    "📬 Mail": "mail", "📅 Today": "today", "🧠 Memory": "memory", "🏠 Home": "home", "➕ Add": "add", "⚙️ Settings": "settings",
+    "📬 Mail": "mail", "📅 Today": "today", "🧠 Memory": "memory", "🏠 Home": "home", "➕ Add": "add", "⚙️ Settings": "settings", "🎯 Focus": "focus",
 }
 
 
@@ -114,7 +116,7 @@ def home_screen(data: HomeData) -> Screen:
         [_b(mail_label, "nav:mail"), _b("📅 Today", "nav:today:0")],
         [_b("🧠 Memory", "nav:mem:0"), _b("👤 Profile", "nav:profile")],
         [_b("➕ Add", "nav:add"), _b("⚙️ Settings", "nav:settings")],
-        [_b("🔄 Refresh", "nav:home")],
+        [_b("🎯 Focus", "nav:focus"), _b("🔄 Refresh", "nav:home")],
     ]
     return Screen(f"{header}\n\n{body}{footer}", buttons)
 
@@ -312,6 +314,7 @@ def help_screen() -> Screen:
         "🧠 <b>Memory</b>: browse, open and forget what I know\n"
         "➕ <b>Add</b>: events and memories, step by step\n"
         "👤 <b>Profile</b>: who I think you are, plus a quick interview\n"
+        "🎯 <b>/focus</b>: study mode, e.g. <code>/focus 1 hour</code>, or with a goal: <code>/focus 50 min, finish lecture 6</code>. Screens set up, distractions blocked, a break, a daily recap\n"
         "☀️ <b>/brief</b>: your day in one message\n"
         "⚙️ <b>Settings</b>: alerts, quiet hours, voice, model\n\n"
         "Type <code>/remember …</code>, <code>/forget …</code> or <code>/memory …</code> any time.",
@@ -329,3 +332,56 @@ def listen_button(key: str) -> dict[str, str]:
 
 def welcome_text(name: str) -> str:
     return f"👋 <b>Linked, {esc(name)}.</b> I'm Miki.\nUse the buttons below, or just talk to me."
+
+
+# ------------------------------------------------------------------------------------------------ focus mode
+FOCUS_ROUNDS = (25, 45, 60)
+
+
+def focus_buttons(phase: str, minutes: int = 60) -> Buttons:
+    """The buttons that fit each moment: start, keep going or stop while focusing, what next on a break."""
+    if phase == "focus":
+        return [[_b("🔄 Status", "fc:status"), _b("➕ 15 min", "fc:more:15"), _b("⏹ End", "fc:stop")]]
+    if phase == "break":
+        return [[_b("➕ 15 more minutes", "fc:more:15"), _b(f"▶️ New {minutes} min round", f"fc:start:{minutes}")], [_b("✅ I'm done", "fc:stop")]]
+    return [[_b(f"▶️ {m} min", f"fc:start:{m}") for m in FOCUS_ROUNDS], [_b("📅 Today", "fc:today"), _b("📊 Stats", "fc:stats"), _b("🧠 Habits", "fc:habits")], [_b("🚫 Banned", "fc:banned"), *_home_row()]]
+
+
+def focus_screen(view: dict[str, Any]) -> Screen:
+    """``view``: phase, minutes_left, until, distractions, today_minutes, streak, minutes (default round)."""
+    phase = view.get("phase", "idle")
+    if phase == "focus":
+        n = view["distractions"]
+        head = (f"🎯 <b>Focusing</b> · {view['minutes_left']} min left\n"
+                f"Until {esc(view['until'])} · {n} distraction{'s' if n != 1 else ''} bounced")
+        if view.get("goal"):
+            head += f"\n🏁 {esc(view['goal'])}" + (" ✓" if view.get("goal_done") else "")
+    elif phase == "break":
+        head = f"☕ <b>Break time</b> · {view['minutes_left']} min left\nThe lock is off. Stretch, drink some water."
+        if view.get("goal"):
+            head += f"\n🏁 {esc(view['goal'])}" + {True: " ✓", False: " (not yet)"}.get(view.get("goal_done"), "")
+    else:
+        head = "🎯 <b>Focus mode</b>\nGemini on Screen 1, Claude on Screen 2, distractions (YouTube, TikTok, Discord...) blocked. I'll call a break when the time is up."
+    tail = f"\n\n📈 Today: {view['today_minutes']} min" + (f" · 🔥 {view['streak']}-day streak" if view.get("streak", 0) >= 2 else "")
+    return Screen(head + tail, focus_buttons(phase, int(view.get("minutes", 60))))
+
+
+def focus_stop_confirm() -> Screen:
+    return Screen("⏹ <b>End focus early?</b>\nYou still have time left.", [[_b("✅ Yes, end it", "fc:stopy"), _b("💪 Keep going", "fc:status")]])
+
+
+def focus_event_screen(kind: str, text: str, minutes: int = 60, ask_goal: bool = False) -> Screen:
+    """A push for something the clock decided: 10 minutes left, break time, break over.
+
+    ``ask_goal``: the round had a goal nobody has answered for yet, so the break screen asks "did you finish it?" first.
+    """
+    icon = {"warn": "⏳", "time_up": "☕", "break_over": "🔔", "recap": "🌙"}.get(kind, "🎯")
+    if kind in {"time_up", "recap"}:
+        first, _, rest = text.partition("\n")
+        buttons = focus_buttons("break", minutes) if kind == "time_up" else None
+        if buttons is not None and ask_goal:
+            buttons = [[_b("✅ Got it done", "fc:goal:yes"), _b("⏳ Not yet", "fc:goal:no")], *buttons]
+        return Screen(f"{icon} <b>{esc(first)}</b>\n{esc(rest)}", buttons)
+    if kind == "break_over":
+        return Screen(f"{icon} <b>{esc(text)}</b>", [[_b(f"▶️ Focus {minutes} min", f"fc:start:{minutes}"), _b("✅ I'm done", "fc:done")]])
+    return Screen(f"{icon} {esc(text)}", None)

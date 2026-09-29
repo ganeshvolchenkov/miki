@@ -16,6 +16,7 @@ from app.core.mail_attention import MailAttention
 from app.core.mail_triage import MailTriage
 from app.phone.backend import CoreBackend, PhoneHooks
 from app.phone.bot import PhoneBot
+from app.phone import ui
 from app.phone.notifier import PhoneNotifier
 from app.phone.state import PhoneState
 from app.phone.telegram_api import TelegramApi
@@ -49,8 +50,10 @@ class PhoneService:
         api: TelegramApi | None = None,
         state: PhoneState | None = None,
         watch_seconds: float = DEFAULT_WATCH_SECONDS,
+        focus: Any = None,
     ) -> None:
         self.core = core
+        self.focus = focus
         self.hooks = hooks or PhoneHooks()
         self.api = api or TelegramApi(settings.telegram_bot_token or "")
         self.state = state or PhoneState()
@@ -61,8 +64,12 @@ class PhoneService:
             core, lock=lock, mail=self.mail, openai_client=openai_client, transcribe_model=settings.transcribe_model,
             tts_model=settings.tts_model, tts_voice=settings.tts_voice, hooks=self.hooks,
         )
-        self.bot = PhoneBot(self.api, self.state, self.backend, hooks=self.hooks, quiet_default=settings.quiet_hours)
-        self.notifier = PhoneNotifier(self.api, self.state, quiet_hours=settings.quiet_hours)
+        self.bot = PhoneBot(self.api, self.state, self.backend, hooks=self.hooks, quiet_default=settings.quiet_hours, focus=focus)
+        self.notifier = PhoneNotifier(
+            self.api, self.state, quiet_hours=settings.quiet_hours, hold=(lambda: focus.is_focusing) if focus is not None else (lambda: False)
+        )
+        if focus is not None:
+            focus.add_listener(self._focus_event)
         self._watch_seconds = float(os.getenv("MIKI_MAIL_WATCH_SECONDS", "") or watch_seconds)
         self._stop = threading.Event()
         self._owns_bot = False
@@ -120,6 +127,13 @@ class PhoneService:
             logger.debug("Could not build the morning brief", exc_info=True)
             return False
         return self.notifier.send(screen.text, key=f"brief:{now.date().isoformat()}", buttons=screen.buttons)
+
+    def _focus_event(self, event: Any) -> None:
+        """Focus timers (10 minutes left, break time, break over) go to the phone at once, whatever the quiet hours say."""
+        summary = event.summary or {}
+        ask_goal = bool(summary.get("goal")) and summary.get("goal_done") is None
+        screen = ui.focus_event_screen(event.kind, event.text, self.focus.config.minutes, ask_goal=event.kind == "time_up" and ask_goal)
+        self.notifier.send(screen.text, key=None, buttons=screen.buttons, direct=True)
 
     # ------------------------------------------------------------------ dashboard helpers
     def status(self) -> PhoneStatus:

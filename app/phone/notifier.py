@@ -56,6 +56,7 @@ class PhoneNotifier:
         *,
         quiet_hours: str = DEFAULT_QUIET_HOURS,
         max_per_hour: int = MAX_PER_HOUR,
+        hold: Callable[[], bool] = lambda: False,
         now: Callable[[], datetime] = datetime.now,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -63,31 +64,42 @@ class PhoneNotifier:
         self.state = state
         self.quiet_hours = quiet_hours
         self.max_per_hour = max_per_hour
+        self.hold = hold  # True while the user must not be disturbed (focus mode): pushes wait, they aren't lost
         self._now = now
         self._clock = clock
         self._sent: deque[float] = deque()
 
     # ------------------------------------------------------------------ core
-    def send(self, text: str, *, key: str | None = None, buttons: list[list[dict[str, str]]] | None = None) -> bool:
-        """Send one push if allowed. Returns True only if it was actually delivered."""
+    def send(
+        self, text: str, *, key: str | None = None, buttons: list[list[dict[str, str]]] | None = None, direct: bool = False
+    ) -> bool:
+        """Send one push if allowed. Returns True only if it was actually delivered.
+
+        ``direct`` is for things the user asked for themselves (a focus timer they started): those ignore quiet
+        hours, the hourly limit and the focus hold, because being late defeats their whole point.
+        """
         chat_id = self.state.chat_id
         if chat_id is None:
             return False
         if key is not None and self.state.already_notified(key):
             return False
-        if in_quiet_hours(self._now(), self.state.pref("quiet_hours", self.quiet_hours)):
-            return False  # not marked as notified, so it goes out once quiet hours end
-        cutoff = self._clock() - 3600
-        while self._sent and self._sent[0] < cutoff:
-            self._sent.popleft()
-        if len(self._sent) >= self.max_per_hour:
-            return False
+        if not direct:
+            if self.hold():
+                return False  # not marked as notified, so it goes out after focus mode
+            if in_quiet_hours(self._now(), self.state.pref("quiet_hours", self.quiet_hours)):
+                return False  # not marked as notified, so it goes out once quiet hours end
+            cutoff = self._clock() - 3600
+            while self._sent and self._sent[0] < cutoff:
+                self._sent.popleft()
+            if len(self._sent) >= self.max_per_hour:
+                return False
         try:
             self.api.send_message(chat_id, text, buttons=buttons)
         except TelegramError as exc:
             logger.warning("Push failed: %s", exc.description)
             return False
-        self._sent.append(self._clock())
+        if not direct:
+            self._sent.append(self._clock())
         if key is not None:
             self.state.mark_notified(key)
         return True

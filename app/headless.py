@@ -61,10 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(filename="data/phone.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     from app.core.bootstrap import build_runtime
+    from app.focus.service import build_focus_service
     from app.phone.service import build_phone_service
 
     runtime = build_runtime()
-    phone = build_phone_service(runtime.core, runtime.settings, openai_client=runtime.openai_client)
+    focus = build_focus_service(core=runtime.core)
+    phone = build_phone_service(runtime.core, runtime.settings, openai_client=runtime.openai_client, focus=focus)
     if phone is None:
         print("No Telegram bot is configured. Set TELEGRAM_BOT_TOKEN in .env first (see /phone in the Miki dashboard).")
         return 1
@@ -72,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         print("The phone bot is already running in another Miki process. Nothing to do.")
         return 0
 
+    if focus is not None:
+        focus.start()  # the focus clock lives with the bot: /focus from your phone is handled here
     time.sleep(2)  # give the bot a moment to look itself up
     status = phone.status()
     print(f"Miki phone service is running as @{status.username or '?'} ({'linked' if status.paired else 'not linked yet'}). Ctrl+C to stop.")
@@ -80,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(3600)
     except KeyboardInterrupt:
         phone.stop()
+        if focus is not None:
+            focus.close()
     return 0
 
 

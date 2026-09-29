@@ -12,3 +12,4 @@ networkx>=3.0
 PyYAML>=6.0
 customtkinter>=5.2
 streamlit>=1.30
+psutil>=5.9

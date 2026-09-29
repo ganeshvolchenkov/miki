@@ -359,6 +359,33 @@ class ObsidianMemoryStore(MemoryStore):
         self._write_if_changed(path, "\n".join(lines))
         return path
 
+    def write_focus_note(self, iso_day: str, *, minutes: int, rounds: int, body: str) -> Path:
+        """``Miki/Journal/<day> focus.md``: how long you studied that day and when (written by focus mode).
+
+        A separate file from the conversation journal, so writing one never overwrites the other; both live in
+        the vault, so Miki's search can answer "how much did I study last Tuesday?".
+        """
+        self.journal_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "---",
+            "type: focus",
+            f"date: {iso_day}",
+            f"focus_minutes: {minutes}",
+            f"rounds: {rounds}",
+            "tags: [journal, focus, study]",
+            "---",
+            "",
+            f"# Focus {iso_day}",
+            "",
+            body.strip(),
+            "",
+        ]
+        if self.journal_exists(iso_day):
+            lines.extend(["## Related", "", f"[[{iso_day}]]", ""])
+        path = self.journal_dir / f"{iso_day} focus.md"
+        self._write_if_changed(path, "\n".join(lines))
+        return path
+
     def write_profile_note(self, profile: dict[str, Any]) -> Path:
         """Write ``Miki/Graph/Profile.md``: the portrait plus how well each area of life is known."""
         context = self._build_context()

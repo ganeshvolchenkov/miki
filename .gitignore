@@ -30,4 +30,10 @@ test_cli_features.py
 skills-lock.json
 
 linkedin-content-skill
-brag-output 
+brag-output
+
+# Packaged desktop app (build_scripts/build_exe.sh) -- rebuild locally, don't ship the binary
+Miki.exe
+build/
+*.spec
+

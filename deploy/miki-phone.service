@@ -1,5 +1,5 @@
 [Unit]
-Description=Miki phone service (Telegram bot + memory brain)
+Description=Miki's brain (Telegram bot, memory, dashboard back end, focus clock)
 After=network-online.target
 Wants=network-online.target
 

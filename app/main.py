@@ -4,6 +4,22 @@ import os
 
 
 def main() -> int:
+    import sys
+
+    args = sys.argv[1:]
+    # The packaged Miki.exe is one file, so it also starts its helper processes: `Miki.exe --hands`, `Miki.exe --pet`.
+    if args[:1] == ["--hands"]:
+        from app.hands.agent import main as hands_main
+
+        return hands_main(args[1:])
+    if args[:1] == ["--pet"]:
+        from app.focus.pet import main as pet_main
+
+        return pet_main(args[1:])
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
     ui_mode = os.getenv("MIKI_UI", "gui").strip().lower()
     if ui_mode == "cli":
         from app.interfaces.cli import run_cli
@@ -16,6 +32,13 @@ def main() -> int:
         single_instance.focus_existing_window()
         print("Miki is already running; brought its window to the front.")
         return 0
+
+    if os.getenv("MIKI_SERVER", "").strip() or os.getenv("MIKI_LINK_ADDRESS", "").strip():
+        # The brain lives on the server: this window only shows it. Never fall back to a local brain here, or the
+        # laptop would grow a second, diverging memory.
+        from app.interfaces.remote_gui import run_remote_gui
+
+        return run_remote_gui()
 
     try:
         from app.interfaces.web_gui import run_gui

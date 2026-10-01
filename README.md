@@ -122,6 +122,20 @@ On the first run, sign in to Gemini and Claude once in the Chrome window Miki op
 | `MIKI_FOCUS_SWAP_SCREENS=1` | Swap which monitor is "Screen 1" (default: the primary one) |
 | `MIKI_CHROME_PATH`, `MIKI_FOCUS=0` | Chrome location; switch focus mode off |
 
+### 📋 Plan your day in plain English
+Tell Miki how you want the day to go and she works out a timeline that actually fits:
+
+> `/plan I want to study 8 hours, 5 linear algebra and 3 calculus, with a 50 minute lunch break. I also want to hit the gym, and be home at 8pm for dinner.`
+
+- **The AI only reads, code does the clock.** The sentence becomes a list of wishes; a scheduler then lays them out: trips between places, study as focus-sized rounds with breaks, lunch at the break closest to lunchtime, and whatever is already in your calendar left alone. It tries every sensible order (gym before, after, or in the middle of studying) and keeps the one that's on time with the least travel.
+- **It tells you when it can't fit.** "⚠️ 1h late for dinner at 20:00", and changes it checked that *would* fit: "Study 7h instead of 8h: home by 19:55", "Skip gym: home by 19:30".
+- **It knows your places.** Teach it once: `/plan remember school and the gym are 50 min from home, the gym is 15 min from school, I spend 1h15 at the gym, and I study at school`. Travel facts you mention in a request are remembered too; `/plan places` shows them.
+- **Change it in words.** "✏️ Change" (or `/plan gym after studying`) edits the draft; `/plan new …` starts over.
+- **"Looks good" puts it in Google Calendar** (one event per block, marked as Miki's, removed again if you replace or cancel the plan).
+- **Then it guides you.** "🚶 Time to leave for school", "📚 Linear algebra now, until 12:30 [▶️ Focus 60 min]". Each nudge goes out once; ones missed while Miki was off are skipped, not sent late.
+
+Commands: `/plan <your day>` · `/plan ok` · `/plan` (show) · `/plan cancel` · `/plan places` · `/plan remember <facts>` · `/plan new <your day>`. The reading model is `MIKI_PLAN_MODEL` (default `gpt-4.1-mini`); `MIKI_PLAN=0` switches it off.
+
 ### 🖥️ A dashboard worth looking at
 A lightweight, futuristic Command Center: animated pixel mascot, an interactive memory map, and live widgets for Calendar, Mail, Weather, Maps and Drive. Built to stay light: idle animations are gated so a resting dashboard uses almost no CPU.
 
@@ -209,12 +223,24 @@ MIKI_UI=cli python -m app.main   # terminal chat instead of the dashboard
 3. Type `/phone` in the dashboard. You get a one-time code (valid 10 minutes).
 4. In your new bot, send `/pair <code>`. Done.
 
-### Keep her running 24/7
+### Keep her running 24/7: a brain on a server, hands on your laptop
+Miki can live on an always-on Linux server (the **brain**: chat, memory, mail, calendar, the phone bot,
+the focus clock) while your laptop is only her **hands** (the dashboard window, plus a small agent that
+arranges your screens and bounces distractions during `/focus`). There is one memory, on the server,
+and your phone and laptop both talk to it.
+
+- The brain listens only on the server's loopback. The laptop reaches it through an **SSH tunnel** with
+  the key you already log in with, plus a shared `MIKI_LINK_TOKEN`. No new port is open to the internet.
+- `/focus` from your phone sets up your laptop's screens. If the laptop is off, Miki says so. If the
+  connection drops, the laptop stops guarding by itself when the round's time is up.
+
 ```bash
-python -m app.headless                      # run in the foreground
-python -m app.headless --install-autostart  # start silently at Windows login
-python -m app.headless --remove-autostart   # remove from startup
+python -m app.link token                   # make the shared secret (same value in both .env files)
+python -m app.headless                     # on the server: the brain (with MIKI_LINK_TOKEN set)
+python -m app.hands --install-autostart    # on the laptop: the hands at login (with MIKI_SERVER set)
 ```
+
+Full step-by-step guide: [docs/deploy-contabo.md](docs/deploy-contabo.md).
 
 ---
 
@@ -236,6 +262,7 @@ python -m app.headless --remove-autostart   # remove from startup
 | `/model` | Switch the OpenAI model on the fly to control cost |
 | `/phone` | Pair Miki with your phone |
 | `/focus [minutes\|stop]` | Study mode: screens set up, distractions blocked, a break after an hour |
+| `/plan <your day>` | Plan the day in plain English; `/plan ok` locks it in and adds it to your calendar |
 
 Or just talk to her. Slash commands are optional.
 
@@ -267,7 +294,11 @@ app/
 ├── rag/          chunking, embeddings, index, retriever, ranking
 ├── tools/        calendar, mail, drive, maps, weather (+ registry)
 ├── phone/        Telegram API, bot, notifier, headless service
-└── interfaces/   web dashboard (HTML/CSS/JS), face, commands
+├── focus/        focus mode: timeline (session/service), desk (windows, bouncer, pet)
+├── plan/         /plan: request reader (AI -> checked JSON), scheduler (pure Python), service (calendar, nudges)
+├── link/         brain <-> hands: JSON-lines protocol, hub (server), client + SSH tunnel (laptop)
+├── hands/        the laptop agent that does focus mode's screen work for the brain
+└── interfaces/   web dashboard (HTML/CSS/JS), thin remote dashboard, face, commands
 ```
 
 - **Local vector index:** brute-force cosine similarity over a local file. Ideal for personal-scale data, with no vector DB to run.

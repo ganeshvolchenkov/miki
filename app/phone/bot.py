@@ -30,6 +30,7 @@ from app.phone.backend import PhoneHooks
 from app.phone.format import chunk_text, to_telegram_html
 from app.phone.state import PhoneState
 from app.phone.telegram_api import TelegramApi, TelegramError
+from app.plan.service import CANCEL_WORDS, OK_WORDS
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ COMMANDS = [
     ("today", "Your calendar"),
     ("brief", "Your day in one message"),
     ("focus", "Start a focus session"),
+    ("plan", "Plan your day in plain English"),
     ("memory", "What I remember about you"),
     ("profile", "Who I think you are"),
     ("interview", "Let me get to know you"),
@@ -82,8 +84,10 @@ class PhoneBot:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
         focus: Any = None,
+        plan: Any = None,
     ) -> None:
         self.focus = focus  # the FocusService, if focus mode is available
+        self.plan = plan  # the PlanService (/plan), if day planning is available
         self.api = api
         self.state = state
         self.backend = backend
@@ -246,6 +250,8 @@ class PhoneBot:
             self._open(chat_id, "home")
         elif command == "focus":
             self._focus_command(chat_id, argument)
+        elif command == "plan":
+            self._plan_command(chat_id, argument)
         elif command == "unlink":
             self.state.unpair()
             self.hooks.on_state()
@@ -345,6 +351,80 @@ class PhoneBot:
         elif action == "done":
             self._clear_buttons(chat_id, message_id)
             return "Nice work today"
+        return ""
+
+    # ------------------------------------------------------------------ day plan
+    def _plan_command(self, chat_id: int, argument: str) -> None:
+        """/plan [how you want your day to go | ok | cancel | places | remember <facts> | new <...>]"""
+        if self.plan is None:
+            self._send(chat_id, "Day planning isn't available.", mode="plain")
+            return
+        word, _, rest = argument.strip().partition(" ")
+        lowered = argument.strip().lower()
+        if not lowered or lowered in {"show", "today", "status"}:
+            self._plan_reply(chat_id, self.plan.show())
+        elif lowered in {"places", "place"}:
+            self._send(chat_id, self.plan.places_text(), mode="plain")
+        elif lowered in CANCEL_WORDS:
+            self._send(chat_id, self.plan.cancel().text, mode="plain")  # typed out in full: no second question
+        else:
+            with self._typing(chat_id):  # the AI reads it and the calendar is asked: a few seconds
+                if lowered in OK_WORDS:
+                    reply = self.plan.confirm()
+                elif word.lower() in {"remember", "learn"}:
+                    reply = self.plan.remember(rest)
+                elif word.lower() == "new":
+                    reply = self.plan.make(rest, fresh=True)
+                else:
+                    reply = self.plan.make(argument)
+            self._plan_reply(chat_id, reply)
+
+    def _plan_reply(self, chat_id: int, reply: Any, edit_id: int | None = None) -> None:
+        buttons = ui.plan_buttons(reply.status)
+        if edit_id is not None:
+            self._show(chat_id, ui.Screen(ui.esc(reply.text), buttons), edit_id)
+        else:
+            self._send(chat_id, reply.text, mode="plain", buttons=buttons)
+
+    def _plan_callback(self, chat_id: int, message_id: int | None, rest: str) -> str:
+        if self.plan is None:
+            return "Day planning isn't available"
+        action, _, arg = rest.partition(":")
+        if action == "ok":
+            self._clear_buttons(chat_id, message_id)
+            with self._typing(chat_id):
+                reply = self.plan.confirm()
+            self._plan_reply(chat_id, reply)
+            return "" if reply.ok else "Nothing to confirm"
+        if action == "edit":
+            self._awaiting = "plan"
+            self._send(chat_id, ui.PROMPTS["plan"][0], mode="html", reply_markup=ui.prompt_markup("plan"))
+            return ""
+        if action == "drop":
+            self._clear_buttons(chat_id, message_id)
+            self._send(chat_id, self.plan.discard_draft().text, mode="plain")
+            return ""
+        if action == "show":
+            self._plan_reply(chat_id, self.plan.show(), edit_id=message_id)
+            return ""
+        if action == "cancel":
+            self._show(chat_id, ui.plan_cancel_confirm(), message_id)
+            return ""
+        if action == "cancely":
+            self._clear_buttons(chat_id, message_id)
+            self._send(chat_id, self.plan.cancel().text, mode="plain")
+            return ""
+        if action == "fc":
+            if self.focus is None:
+                return "Focus mode isn't available"
+            target = self.plan.focus_for(int(arg)) if arg.isdigit() else None
+            if target is None:
+                return "That block isn't in today's plan any more"
+            self._clear_buttons(chat_id, message_id)
+            with self._typing(chat_id):
+                reply = self.focus.start_focus(target[0], goal=target[1])
+            self._focus_reply(chat_id, reply)
+            return "" if reply.ok else "Couldn't start focus"
         return ""
 
     def _clear_buttons(self, chat_id: int, message_id: int | None) -> None:
@@ -451,9 +531,13 @@ class PhoneBot:
     def _on_chat(self, chat_id: int, text: str, message_id: int | None, *, spoken: bool = False) -> None:
         self.hooks.on_message("user", text)
         self._react(chat_id, message_id, "👀")
+        def learned_later(memories: list[dict[str, Any]]) -> None:  # the memory pipeline runs after the reply is sent
+            lines = "\n".join(f"• {m['title']}" for m in memories[:4])
+            self._send(chat_id, f"🧠 Remembered:\n{lines}", mode="plain")
+
         try:
             with self._typing(chat_id):
-                reply = self.backend.chat(text)
+                reply = self.backend.chat(text, on_memories=learned_later)
         except Exception as exc:
             logger.exception("Phone chat failed")
             self._react(chat_id, message_id, None)
@@ -478,6 +562,10 @@ class PhoneBot:
             self._send(chat_id, f"✅ {result}" if result.startswith("Remembered") else result, mode="plain")
         elif kind == "event":
             self._on_chat(chat_id, f"Add this to my calendar: {text}", message_id)
+        elif kind == "plan" and self.plan is not None:
+            with self._typing(chat_id):
+                reply = self.plan.make(text)
+            self._plan_reply(chat_id, reply)
         else:
             self._on_chat(chat_id, text, message_id)
 
@@ -571,6 +659,8 @@ class PhoneBot:
             return ""
         if kind == "fc":
             return self._focus_callback(chat_id, message_id, rest)
+        if kind == "pl":
+            return self._plan_callback(chat_id, message_id, rest)
         if kind == "cf" and rest in {"yes", "no"}:
             if message_id is not None:
                 self.api.remove_buttons(chat_id, message_id)

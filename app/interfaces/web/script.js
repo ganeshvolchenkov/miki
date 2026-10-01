@@ -11,6 +11,7 @@ const COMMANDS = [
     { cmd: '/mail', desc: 'Emails that need your attention, and why' },
     { cmd: '/phone', desc: 'Link Miki to your phone (Telegram)' },
     { cmd: '/focus', desc: 'Study mode: Gemini + Claude, distractions blocked, break after an hour' },
+    { cmd: '/plan', desc: 'Plan your day in plain English (then /plan ok, /plan cancel, /plan places)' },
     { cmd: '/interview', desc: 'I ask you questions to get to know you' },
     { cmd: '/profile', desc: 'Who I think you are, and what I don\'t know yet' },
     { cmd: '/remember', desc: 'Store something about you on purpose' },

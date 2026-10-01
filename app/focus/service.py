@@ -23,13 +23,12 @@ from typing import Any, Callable
 
 from app.core import single_instance
 from app.focus import duration, habits as habit_module, rules
-from app.focus.chrome import DEFAULT_PORT, FocusChrome, find_chrome
-from app.focus.guard import Bounce, FocusGuard
+from app.focus.chrome import DEFAULT_PORT
+from app.focus.desk import FocusDesk
+from app.focus.guard import Bounce
 from app.focus.memory import FocusMemory
-from app.focus.pet_host import PetHost
 from app.focus.recap import day_facts, format_minutes, recap_text
 from app.focus.session import BREAK, DEFAULT_BREAK_MINUTES, DEFAULT_MINUTES, FOCUS, Event, FocusSession
-from app.focus.winapi import Rect, Window, create_desktop, order_screens, split_rect
 
 logger = logging.getLogger(__name__)
 
@@ -136,24 +135,28 @@ class FocusService:
         beep: Callable[[], None] | None = None,
         memory: Any = None,
         ai_minutes: Callable[[str, datetime], int | None] | None = None,
+        hands: Any = None,
     ) -> None:
         self.config = config or FocusConfig.from_env()
         self.session = session or FocusSession(self.config.state_path, clock=clock)
-        self.desktop = desktop if desktop is not None else create_desktop()
-        chrome_path = find_chrome(self.config.chrome_path)
-        self.chrome = chrome if chrome is not None else (
-            FocusChrome(chrome_path, self.config.profile_dir, port=self.config.port) if chrome_path else None
-        )
-        self.pet = pet if pet is not None else PetHost()
-        self.guard = FocusGuard(
-            self.desktop, self.chrome, banned_sites=self.banned_sites, banned_apps=self.banned_apps,
-            own_pids=self._own_pids, home_url=self.config.screen2_url, on_bounce=self._on_bounce,
-        ) if self.desktop is not None else None
+        # Two ways to reach the screen: a desk on this machine (Miki runs on your Windows PC), or ``hands``, the laptop
+        # at the other end of the link (Miki's brain runs on the server and the laptop does the window work).
+        self.hands = hands
+        if hands is None:
+            self.desk: FocusDesk | None = FocusDesk(
+                self.config, desktop=desktop, chrome=chrome, pet=pet,
+                banned_sites=self.banned_sites, banned_apps=self.banned_apps, on_bounce=self._on_bounce,
+            )
+            self.desktop, self.chrome, self.pet, self.guard = self.desk.desktop, self.desk.chrome, self.desk.pet, self.desk.guard
+        else:
+            self.desk = None
+            self.desktop = self.chrome = self.guard = None
+            self.pet = hands.pet
         self.memory = memory  # a FocusMemory: keeps the study-habits memory and the daily notes
         self._ai_minutes = ai_minutes  # understands durations the plain parser can't ("until 3pm")
         self._clock = clock
         self._lock_name = lock_name
-        self._beep = beep or _default_beep
+        self._beep = beep or (hands.beep if hands is not None else _default_beep)
         self._listeners: list[Callable[[FocusEvent], None]] = []
         self._rlock = threading.RLock()
         self._armed = threading.Event()  # the bouncer only works once the screens are set up
@@ -181,17 +184,10 @@ class FocusService:
     def banned_apps(self) -> frozenset[str]:
         return frozenset(e for e in self._ban_entries() if e.endswith(".exe"))
 
-    def _own_pids(self) -> set[int]:
-        pids = {os.getpid()}
-        pet_pid = getattr(self.pet, "pid", None)
-        if pet_pid:
-            pids.add(int(pet_pid))
-        return pids
-
     # ------------------------------------------------------------------ lifecycle
     @property
     def available(self) -> bool:
-        return self.config.enabled and self.desktop is not None
+        return self.config.enabled and (self.desktop is not None or self.hands is not None)
 
     @property
     def is_focusing(self) -> bool:
@@ -331,10 +327,9 @@ class FocusService:
     def start_focus(self, minutes: int | float | None = None, goal: str = "") -> FocusReply:
         if not self.config.enabled:
             return FocusReply(False, "Focus mode is switched off (MIKI_FOCUS=0).")
-        if self.desktop is None or self.guard is None:
-            return FocusReply(False, "Focus mode needs Windows.")
-        if self.chrome is None:
-            return FocusReply(False, "I couldn't find Google Chrome. Install it, or set MIKI_CHROME_PATH in .env.")
+        problem = self.hands.problem() if self.hands is not None else self.desk.problem()
+        if problem:
+            return FocusReply(False, problem)
         if not self._owns and not self.start():
             return FocusReply(False, "Focus mode is running in another Miki window, so I can't start it from here.")
         with self._rlock:
@@ -387,6 +382,8 @@ class FocusService:
         if was_break:
             threading.Thread(target=self._arm, name="miki-focus-arm", daemon=True).start()
         else:
+            if self.hands is not None:
+                self.hands.set_until(round_.ends_at)
             self.pet.timeline(round_.started_at, round_.ends_at)
             self.pet.say(f"{int(minutes)} more minutes. Let's go!", 5)
         return FocusReply(True, f"Added time. Focus now ends at {_hm(round_.ends_at)}.")
@@ -397,7 +394,7 @@ class FocusService:
             summary = self.session.stop()
             if not summary:
                 return FocusReply(False, "There's no focus session running.")
-            self._armed.clear()
+            self._disarm()
         self.pet.say("See you next round!", 3)
         self._pet_off_at = self._clock() + 3
         self._log_round(summary)
@@ -407,76 +404,58 @@ class FocusService:
     def _arm(self) -> None:
         """Windows on the right screens, clutter tucked away, pet out, then the bouncer goes on duty."""
         self._armed.clear()
-        try:
-            self._layout_windows()
-        except Exception:
-            logger.exception("Could not set up the focus screens")
-        try:
-            if self.guard is not None:
-                self.guard.clean_slate()
-        except Exception:
-            logger.debug("clean slate failed", exc_info=True)
-        self._start_pet()
         round_ = self.session.round
+        if self.hands is not None:
+            self.hands.arm(self.banned_sites(), sorted(self.banned_apps()), round_.ends_at)  # the laptop does the set-up
+        else:
+            self.desk.set_up()
         self.pet.timeline(round_.started_at, round_.ends_at)
         self.pet.say(f"Goal: {_short(round_.goal)}. Let's go!" if round_.goal else "Focus time! I'll keep watch.", 5)
         self.pet.info(self._pet_info())
         if self.session.phase == FOCUS:
             self._armed.set()
 
+    def _disarm(self) -> None:
+        """The bouncer goes off duty (here, and on the laptop when that is where it runs)."""
+        self._armed.clear()
+        if self.hands is not None:
+            self.hands.disarm()
+
     def _start_pet(self) -> None:
-        try:
-            with self.desktop.physical_pixels():
-                screens = order_screens(self.desktop.monitors(), swap=self.config.swap_screens)
-            if screens:
-                self.pet.start(screens[0].work)
-        except Exception:
-            logger.debug("pet start failed", exc_info=True)
+        if self.hands is not None:
+            self.pet.start(None)  # the laptop picks its own screen
+        else:
+            self.desk.start_pet()
 
-    def _focus_windows(self) -> list[Window]:
-        pids = self.chrome.browser_pids()
-        return [w for w in self.desktop.app_windows() if w.exe == "chrome.exe" and w.pid in pids]
-
-    def _layout_windows(self) -> None:
-        with self.desktop.physical_pixels():
-            screens = order_screens(self.desktop.monitors(), swap=self.config.swap_screens)
-        if not screens:
+    # ------------------------------------------------------------------ the laptop at the other end of the link
+    def hands_connected(self, laptop_armed: bool = False) -> None:
+        """The laptop (re)connected: bring its screens in line with the round, whatever happened while it was away."""
+        if self.hands is None:
             return
-        if len(screens) >= 2:
-            rects = [screens[0].work, screens[1].work]
-        else:  # one monitor: side by side
-            rects = [split_rect(screens[0].work, 0), split_rect(screens[0].work, 1)]
-        urls = [self.config.screen1_url, self.config.screen2_url]
+        phase = self.session.phase  # a round that ran out is closed by the clock within a second (and disarms then)
+        if phase == FOCUS and self.session.seconds_left() > 0:
+            if laptop_armed:  # it kept guarding through a short drop: only refresh what may have changed meanwhile
+                round_ = self.session.round
+                self.hands.set_bans(self.banned_sites(), sorted(self.banned_apps()))
+                self.hands.set_until(round_.ends_at)
+                self.pet.timeline(round_.started_at, round_.ends_at)
+                self.pet.info(self._pet_info())
+                self._armed.set()
+            else:
+                threading.Thread(target=self._arm, name="miki-focus-arm", daemon=True).start()
+            return
+        if laptop_armed:
+            self._disarm()  # the round ended (or was stopped from the phone) while the laptop was away
+        if phase == BREAK:
+            self._start_pet()
+            self.pet.mood("sleep")
+        elif laptop_armed:
+            self.pet.stop()
 
-        existing = self._focus_windows() if self.chrome.is_running() else []
-        gemini = next((w for w in existing if "gemini" in w.title.lower()), None)
-        first = gemini or (existing[0] if existing else None)
-        rest = [w for w in existing if w is not first]
-        second = rest[0] if rest else None
-        chosen: list[Window | None] = [first, second]
-
-        for index, (url, rect) in enumerate(zip(urls, rects)):
-            window = chosen[index]
-            if window is None:
-                window = self._open_window(url, rect)
-            if window is not None:
-                self.desktop.place(window.hwnd, rect)
-        # leave Screen 1's window in front: that is where Gemini is
-        front = chosen[0]
-        if front is not None:
-            self.desktop.activate(front.hwnd)
-
-    def _open_window(self, url: str, rect: Rect) -> Window | None:
-        """Open ``url`` in a new focus-Chrome window and return it once Windows shows it."""
-        before = {w.hwnd for w in self._focus_windows()} if self.chrome.is_running() else set()
-        self.chrome.open_window(url, rect.x, rect.y, rect.w, rect.h)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            time.sleep(0.4)
-            fresh = [w for w in self._focus_windows() if w.hwnd not in before]
-            if fresh:
-                return fresh[0]
-        return None
+    def laptop_bounced(self, kind: str, label: str) -> None:
+        """The laptop's bouncer sent something away: count it, as if it had happened here."""
+        if self.session.phase == FOCUS:
+            self._on_bounce(Bounce(kind, label))
 
     # ------------------------------------------------------------------ what happened
     def _on_bounce(self, bounce: Bounce) -> None:
@@ -493,7 +472,7 @@ class FocusService:
             self.pet.say(f"{left} left. You've got this!", 6)
             text = f"{left} left in this focus round. Finish strong."
         elif event.kind == "time_up":
-            self._armed.clear()
+            self._disarm()
             self._beep()
             self._start_pet()
             self.pet.mood("cheer")
@@ -721,6 +700,8 @@ class FocusService:
         else:
             added.append(target.value)
         self.session.set_banned_changes(added, removed)
+        if self.hands is not None and self.session.phase == FOCUS:
+            self.hands.set_bans(self.banned_sites(), sorted(self.banned_apps()))  # takes effect mid-round
         return FocusReply(True, f"Banned {target.value} during focus.")
 
     def unban(self, text: str) -> FocusReply:
@@ -749,9 +730,10 @@ def _default_beep() -> None:
 
 
 def build_focus_service(core: Any = None, **kwargs: Any) -> FocusService | None:
-    """The focus service, or None when it can't work here (switched off, or not Windows).
+    """The focus service, or None when it can't work here (switched off, or not Windows and no laptop link).
 
     Given Miki's core, focus mode can ask the AI what an odd duration means and can keep study habits in memory.
+    Given ``hands`` (the laptop link, see ``app.link.remote``), the round runs here and the laptop does the screens.
     """
     config = FocusConfig.from_env()
     if not config.enabled:
@@ -761,7 +743,7 @@ def build_focus_service(core: Any = None, **kwargs: Any) -> FocusService | None:
     except Exception:
         logger.exception("Focus mode is unavailable")
         return None
-    if service.desktop is None:
+    if not service.available:
         return None
     if core is not None:
         service.attach(core)

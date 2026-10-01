@@ -10,6 +10,7 @@ Callback data scheme (Telegram allows 64 bytes):
     set:urgent | set:brief | set:voice | set:quiet:<preset> | set:btime:<HHMM>
     model:<index> | iv:start | iv:skip | iv:stop | cf:yes | cf:no | ask:<event|remember|chat> | tts:<key>
     nav:focus | fc:start:<minutes> | fc:more:<minutes> | fc:goal:yes | fc:goal:no | fc:stop | fc:stopy | fc:status | fc:stats | fc:today | fc:habits | fc:banned | fc:done
+    pl:ok | pl:edit | pl:drop | pl:show | pl:cancel | pl:cancely | pl:fc:<block index>     the day plan (/plan)
 """
 
 from __future__ import annotations
@@ -299,6 +300,7 @@ PROMPTS: dict[str, tuple[str, str]] = {
     "event": ("📅 <b>What's the event?</b>\nFor example: <i>gym tomorrow 7–8:30pm at Trainmore</i>", "gym tomorrow 7pm…"),
     "remember": ("🧠 <b>What should I remember?</b>", "I'm allergic to…"),
     "chat": ("💬 <b>What's on your mind?</b>", "Ask me anything…"),
+    "plan": ("✏️ <b>What should change?</b>\nFor example: <i>gym in the morning</i> or <i>only 2 hours of calculus</i>", "gym in the morning…"),
 }
 
 
@@ -315,6 +317,7 @@ def help_screen() -> Screen:
         "➕ <b>Add</b>: events and memories, step by step\n"
         "👤 <b>Profile</b>: who I think you are, plus a quick interview\n"
         "🎯 <b>/focus</b>: study mode, e.g. <code>/focus 1 hour</code>, or with a goal: <code>/focus 50 min, finish lecture 6</code>. Screens set up, distractions blocked, a break, a daily recap\n"
+        "📋 <b>/plan</b>: plan your day in plain English, e.g. <code>/plan study 5h linear algebra, 3h calculus, 50 min lunch, gym, home by 8pm</code>. Travel, rounds and your calendar worked out, nudges through the day\n"
         "☀️ <b>/brief</b>: your day in one message\n"
         "⚙️ <b>Settings</b>: alerts, quiet hours, voice, model\n\n"
         "Type <code>/remember …</code>, <code>/forget …</code> or <code>/memory …</code> any time.",
@@ -364,6 +367,25 @@ def focus_screen(view: dict[str, Any]) -> Screen:
         head = "🎯 <b>Focus mode</b>\nGemini on Screen 1, Claude on Screen 2, distractions (YouTube, TikTok, Discord...) blocked. I'll call a break when the time is up."
     tail = f"\n\n📈 Today: {view['today_minutes']} min" + (f" · 🔥 {view['streak']}-day streak" if view.get("streak", 0) >= 2 else "")
     return Screen(head + tail, focus_buttons(phase, int(view.get("minutes", 60))))
+
+
+def plan_buttons(status: str) -> Buttons | None:
+    """Under a plan: approve or change a draft; change or cancel the day's plan."""
+    if status == "draft":
+        return [[_b("✅ Looks good", "pl:ok"), _b("✏️ Change", "pl:edit")], [_b("✖ Discard", "pl:drop")]]
+    if status == "active":
+        return [[_b("🔄 Show", "pl:show"), _b("✏️ Change", "pl:edit"), _b("✖ Cancel plan", "pl:cancel")]]
+    return None
+
+
+def plan_cancel_confirm() -> Screen:
+    return Screen("✖ <b>Cancel today's plan?</b>\nI'll take its blocks out of your calendar too.",
+                  [[_b("✅ Yes, cancel it", "pl:cancely"), _b("↩️ Keep it", "pl:show")]])
+
+
+def plan_nudge_buttons(block: int | None, minutes: int) -> Buttons | None:
+    """A subject is starting: one tap starts a focus round for it."""
+    return [[_b(f"▶️ Focus {minutes} min", f"pl:fc:{block}")]] if block is not None else None
 
 
 def focus_stop_confirm() -> Screen:

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Protocol
+import queue
+import threading
+import time
+from typing import Callable, Protocol
 
 from app.core.memory_manager import MemoryManager
 from app.core.tool_runner import PendingToolAction, ToolConversationRunner
@@ -20,6 +23,22 @@ def _history_limit() -> int:
         return max(2, int(os.getenv("MIKI_HISTORY_MESSAGES", "30")))
     except ValueError:
         return 30
+
+
+def _serialise(target: object | None, lock: threading.RLock, names: tuple[str, ...]) -> None:
+    """Make each named method of ``target`` (when it has one) run under ``lock``."""
+    if target is None:
+        return
+    for name in names:
+        method = getattr(target, name, None)
+        if not callable(method):
+            continue
+
+        def locked(*args, _method=method, **kwargs):
+            with lock:
+                return _method(*args, **kwargs)
+
+        setattr(target, name, locked)
 
 
 class BrainProtocol(Protocol):
@@ -78,6 +97,15 @@ class MikiCore:
         self.last_memory_candidate = None
         # Every memory created/updated by the most recent message (may be several).
         self.last_memories: list = []
+        # Memory is filed in the background while the next message may already be read: every single store/index
+        # operation takes this lock, so a note is never read half-written. (Per operation, not per pipeline: the next
+        # reply must not wait for the previous message's model calls.)
+        self._memory_lock = threading.RLock()
+        self._memory_worker_lock = threading.Lock()
+        self._memory_jobs: queue.Queue | None = None
+        _serialise(getattr(memory_manager, "memory_store", None), self._memory_lock,
+                   ("create_memory", "update_memory", "delete_memory", "list_memories", "get_memory", "count_memories"))
+        _serialise(rag_service, self._memory_lock, ("index_memory", "remove_memory", "retrieve_context_for_query"))
         self.system_prompt = (
             "You are Miki, a personal AI assistant with a genuine passion for learning about your user. "
             "You are helpful, concise, and natural in conversation. "
@@ -135,13 +163,24 @@ class MikiCore:
         except Exception:
             logger.exception("Failed to remove memory %s from RAG index", memory_id)
 
-    def process_user_input(self, user_input: str) -> tuple[str, bool]:
-        """Process user input and return (response, memory_was_created)."""
+    def process_user_input(
+        self,
+        user_input: str,
+        *,
+        on_memories: Callable[[list], None] | None = None,
+    ) -> tuple[str, bool]:
+        """Process user input and return (response, memory_was_created).
+
+        With ``on_memories``, the reply comes back as soon as the model has answered and the memory pipeline (several
+        model and embedding calls, ~3-4 s) runs afterwards in the background; ``on_memories`` is then called with
+        whatever was learned (only when something was). The return value's flag is False in that case.
+        """
         if not user_input or not user_input.strip():
             return "", False
 
         history = self.conversation_store.read_messages()[-_history_limit():]
         logger.info("Processing user input for Miki Core")
+        started = time.perf_counter()
 
         effective_system_prompt = self.system_prompt
         # Always-on long-term memory (graph-aware, no API call), then any extra
@@ -152,6 +191,7 @@ class MikiCore:
         context_block = self._retrieve_context(user_input)
         if context_block:
             effective_system_prompt = f"{effective_system_prompt}\n\n{context_block}"
+        recalled = time.perf_counter()
 
         has_tool_call = False
         if self.tool_runner is not None:
@@ -174,7 +214,18 @@ class MikiCore:
             )
 
         self.conversation_store.append_turn(user_input, response)
+        answered = time.perf_counter()
+        logger.info("Turn answered in %.2f s (memory + search %.2f s, model %.2f s)",
+                    answered - started, recalled - started, answered - recalled)
 
+        if on_memories is not None and self.memory_manager is not None:
+            self.last_memories = []
+            self._memory_queue().put((user_input, response, has_tool_call, on_memories))
+            return response, False
+        return response, self._learn_from_turn(user_input, response, has_tool_call)
+
+    def _learn_from_turn(self, user_input: str, response: str, has_tool_call: bool) -> bool:
+        """Run the memory pipeline for one turn (several model calls). True when a memory was stored."""
         memory_created = False
         self.last_created_memory = None
         self.last_memory_rag_indexed = False
@@ -192,8 +243,31 @@ class MikiCore:
                         self._index_memory_safely(extra)
             else:
                 self.last_memory_candidate = self.memory_manager.last_candidate
+        return memory_created
 
-        return response, memory_created
+    def _memory_queue(self) -> "queue.Queue":
+        """One background worker files memories in the order the messages came in."""
+        with self._memory_worker_lock:
+            if self._memory_jobs is None:
+                self._memory_jobs = queue.Queue()
+                threading.Thread(target=self._memory_worker, name="miki-memory", daemon=True).start()
+            return self._memory_jobs
+
+    def _memory_worker(self) -> None:
+        while True:
+            user_input, response, has_tool_call, on_memories = self._memory_jobs.get()
+            started = time.perf_counter()
+            try:
+                learned = list(self.last_memories) if self._learn_from_turn(user_input, response, has_tool_call) else []
+            except Exception:
+                logger.exception("Learning from a message failed")
+                continue
+            logger.info("Memory pipeline took %.2f s in the background (%d learned)", time.perf_counter() - started, len(learned))
+            if learned:
+                try:
+                    on_memories(learned)
+                except Exception:
+                    logger.exception("Memory callback failed")
 
     def create_memory(self, content: str, *, category: str = "general", memory_type: str = "fact", confidence: float = 0.5, source: str = "manual"):
         if self.memory_manager is None:

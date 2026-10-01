@@ -15,7 +15,8 @@ class OpenAIClient:
     """Thin abstraction around the OpenAI Responses API."""
 
     def __init__(self, api_key: str, model: str, *, client: OpenAI | None = None) -> None:
-        if not api_key:
+        """``client``: an existing connection to share (then ``api_key`` may be empty), e.g. a second model for one job."""
+        if not api_key and client is None:
             raise ValueError("OpenAI API key is required.")
 
         self.client = client or OpenAI(api_key=api_key)

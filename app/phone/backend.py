@@ -67,13 +67,21 @@ class CoreBackend:
         self._interview: Interview | None = None
 
     # ------------------------------------------------------------------ chat
-    def chat(self, text: str) -> ChatReply:
-        """A normal conversation turn: same brain, memory and tools as the dashboard, one at a time."""
+    def chat(self, text: str, on_memories: Callable[[list[dict[str, Any]]], None] | None = None) -> ChatReply:
+        """A normal conversation turn: same brain, memory and tools as the dashboard, one at a time.
+
+        With ``on_memories`` the reply returns as soon as it's written and what Miki learned arrives a few seconds later
+        through the callback (as toast payloads); without it, both come back together (slower).
+        """
         with self.lock:
             self.hooks.on_busy(True)
             try:
-                response, _created = self.core.process_user_input(text)
-                learned = list(getattr(self.core, "last_memories", None) or [])
+                if on_memories is not None:
+                    response, _created = self.core.process_user_input(text, on_memories=lambda found: on_memories(mc.toast_payload(found)))
+                    learned = []
+                else:
+                    response, _created = self.core.process_user_input(text)
+                    learned = list(getattr(self.core, "last_memories", None) or [])
             finally:
                 self.hooks.on_busy(False)
         self.hooks.on_speak(response)

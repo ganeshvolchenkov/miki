@@ -1,5 +1,6 @@
 import pytest
 
+from app.focus import desk as desk_module
 from app.focus import service as service_module
 from app.focus.service import FocusConfig, FocusService
 from app.focus.session import FocusSession
@@ -99,7 +100,7 @@ def test_cannot_start_while_running(tmp_path):
 
 
 def test_no_chrome_means_a_clear_message_and_no_session(tmp_path, monkeypatch):
-    monkeypatch.setattr(service_module, "find_chrome", lambda explicit=None: None)
+    monkeypatch.setattr(desk_module, "find_chrome", lambda explicit=None: None)
     svc = FocusService(FocusConfig(state_path=tmp_path / "f.json"), desktop=FakeDesktop(), pet=FakePet(), lock_name=None)
     reply = svc.start_focus()
     assert not reply.ok and "Chrome" in reply.text

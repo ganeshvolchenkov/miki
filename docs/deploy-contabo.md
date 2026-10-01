@@ -326,9 +326,9 @@ systemctl --user restart miki-phone
 ```
 
 **Final check:** send your Telegram bot a message from your phone. It should reply, exactly like
-it does when your laptop runs it. `/focus` will say it's unavailable — expected, there's no
-screen on this server. Everything else (chat, memory, mail, calendar, weather) works the same as
-on your laptop.
+it does when your laptop runs it. Everything (chat, memory, mail, calendar, weather) works the same
+as on your laptop. `/focus` needs one more step, connecting your laptop as Miki's hands: that's
+Part 10.
 
 ---
 
@@ -362,13 +362,128 @@ Not covered yet — we'll add it as its own section once Miki is confirmed worki
 
 ---
 
+## Part 10: Your laptop becomes Miki's hands
+
+After this part there is **one Miki**, and she lives on the server. Your laptop no longer has its own
+brain or its own memory. It only has:
+
+- the **dashboard window**, which now shows the server's brain (the same chat, memory and widgets
+  your phone sees), and
+- a small background program called the **hands agent**, which does what needs a real screen: when a
+  focus round starts (from your phone or the dashboard) it puts Gemini and Claude on your monitors,
+  runs the bouncer and shows the pet.
+
+```
+laptop                                          server
+hands agent ──── SSH tunnel (your key) ──────▶  Miki's brain (127.0.0.1:8765, not on the internet)
+dashboard  ──┘                                   ├─ Telegram bot
+                                                 ├─ memory + Obsidian vault
+                                                 └─ focus clock, recap, study habits
+```
+
+**Why SSH?** The brain only listens on the server's own loopback address, so nothing new is open to
+the internet (no firewall change). The laptop reaches it through an SSH tunnel with the key you
+already use to log in, and every connection must also know a shared secret, `MIKI_LINK_TOKEN`.
+
+### 10.1 Make the shared secret
+
+On your **laptop**, in the Miki folder:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.link token
+```
+
+It prints a line like `MIKI_LINK_TOKEN=Qm3...`. Copy it.
+
+### 10.2 Server: switch the brain on
+
+```bash
+ssh miki@<server-ip>
+nano ~/miki/.env
+```
+
+Add these two lines (the token from 10.1, and your timezone, since the server's clock runs on UTC and
+focus times, the evening recap, quiet hours and the morning brief should follow *your* clock):
+
+```
+MIKI_LINK_TOKEN=Qm3...
+MIKI_TIMEZONE=Europe/Amsterdam
+```
+
+Make sure `MIKI_SERVER` is **not** set on the server. Then pull the new code and restart:
+
+```bash
+~/miki/deploy/update.sh
+journalctl --user -u miki-phone -n 20 --no-pager
+```
+
+You should see `Miki's brain is running. Link: 127.0.0.1:8765`.
+
+**Bring your focus history along (optional, once):** your study stats and habits so far live in the
+laptop's `data/` folder. Copy them up, then restart the brain:
+
+```powershell
+scp data\focus.json data\focus_log.jsonl miki@<server-ip>:~/miki/data/
+```
+
+```bash
+systemctl --user restart miki-phone
+```
+
+### 10.3 Laptop: point Miki at the server
+
+Check once that SSH works **without typing anything** (the hands agent can't type a password):
+
+```powershell
+ssh miki@<server-ip> echo ok
+```
+
+It must print `ok` and nothing else. If it asks for a passphrase, either start the Windows
+`ssh-agent` service and run `ssh-add`, or make a separate key without a passphrase and set
+`MIKI_SSH_KEY` to it.
+
+Then edit the laptop's `.env`:
+
+```
+MIKI_LINK_TOKEN=Qm3...            (the same value as on the server)
+MIKI_SERVER=miki@<server-ip>
+TELEGRAM_BOT_TOKEN=               (empty: the server runs the bot)
+```
+
+Open Miki as usual (`Miki.exe` or `miki.pyw`). The dashboard starts the hands agent by itself,
+connects, and the memory pill turns green. Type something: the answer comes from the server.
+
+To have the hands ready even when the dashboard is closed (so `/focus` from your phone always
+works when the laptop is on), start them at login:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.hands --install-autostart
+```
+
+If you'd set up the older "Miki Phone" login launcher (`python -m app.headless --install-autostart`),
+it now starts the hands on this laptop instead of a second bot, because `MIKI_SERVER` is set.
+
+### 10.4 Try it
+
+From your phone: `/focus 25 min`. Within a few seconds your laptop opens Gemini and Claude, tucks the
+rest away and the pet appears. Open YouTube: it's bounced, and `/focus status` on your phone counts
+it. If the laptop is off or asleep, Miki says so instead of starting a round nobody can see.
+
+**If something is off:** the laptop writes `data/hands.log`, and the server logs to
+`journalctl --user -u miki-phone`. The dashboard also says in plain words why it can't connect
+(wrong key, wrong token, server unreachable).
+
+**Safety net:** the hands agent knows when the round ends. If it loses the server and that time
+passes, it stops guarding on its own, so a dropped connection can never leave your laptop stuck in
+focus mode.
+
+---
+
 ## What stays local (on your own PC, not the server)
 
-- The pywebview **dashboard** (`web_gui.py`) — run it on your laptop whenever you want the visual
-  chat window.
-- **`/focus` mode's screen/app bouncing and the pet** — both need your actual monitor and running
-  apps, so they only make sense on your PC. Focus mode automatically detects it isn't on Windows
-  and quietly disables itself on the server instead of crashing.
+Only what needs your actual screen: the dashboard **window** (not its brain) and the hands agent,
+which does focus mode's window arranging, bouncing and the pet. Everything that thinks, remembers or
+sends you messages runs on the server.
 
 ---
 

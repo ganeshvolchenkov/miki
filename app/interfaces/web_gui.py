@@ -12,8 +12,6 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime
 
-import webview
-
 from app.core.bootstrap import build_runtime
 from app.core.model_choice import MODEL_CHOICES, load_saved_model, save_model_preference, switch_model
 from app.core.timeutil import local_utc_offset
@@ -22,8 +20,11 @@ from app.core.mail_attention import MailAttention, MailUnavailable
 from app.phone.backend import PhoneHooks
 from app.focus.service import FocusService, build_focus_service
 from app.phone.service import PhoneService, build_phone_service
+from app.plan.service import PlanService, build_plan_service
 from app.core.mail_triage import MailTriage, gmail_url
 from app.interfaces import memory_commands as mc
+from app.interfaces.webview_host import WINDOW_TITLE, configure_webview2, create_local_server
+from app.interfaces.webview_host import webview_profile_dir as _webview_profile_dir
 from app.memory.brain import layout_graph
 from app.interfaces.face import _FACE_SEQUENCES, _FACE_STATE_BOUNCE, _SUPER_IDLE_SEQUENCE, _compose_face_frame, _random_speaking_frame
 
@@ -51,6 +52,7 @@ class WebApi:
         self._busy = False
         self._face_state = "idle"
         self._face_wake = threading.Event()
+        self._face_resend = False  # a freshly opened (remote) page needs the current face even if nothing changed
         manager = getattr(core, "memory_manager", None)
         self._interview = Interview(manager) if manager is not None else None
         self._profile_refreshing = False
@@ -58,7 +60,8 @@ class WebApi:
         self._core_lock = threading.RLock()  # the core handles one conversation turn at a time (dashboard or phone)
         self._phone: PhoneService | None = None
         self._focus: FocusService | None = None
-        self._mail = MailAttention(lambda name: self._core.get_tool(name), lambda: self._get_triage())
+        self._plan: PlanService | None = None
+        self._mail =MailAttention(lambda name: self._core.get_tool(name), lambda: self._get_triage())
 
     def start_loops(self):
         threading.Thread(target=self._face_loop, daemon=True).start()
@@ -66,7 +69,21 @@ class WebApi:
         threading.Thread(target=self._startup_maintenance, daemon=True).start()
         self._push_model()
         self._start_focus()
+        self._start_plan()
         self._start_phone()
+
+    def dashboard_connected(self) -> None:
+        """A dashboard window on the laptop just (re)connected to this brain on the server: paint the whole page."""
+        self._push_model()
+        self._push_phone_state()
+        self._js(f"setBusy({json.dumps(self._busy)})")
+        self._face_resend = True
+        self._face_wake.set()
+        self._update_widgets()
+
+    @property
+    def _page_open(self) -> bool:
+        return self._window is not None and getattr(self._window, "connected", True)
 
     # ---- JS helpers -------------------------------------------------
     def _js(self, code: str) -> None:
@@ -170,6 +187,27 @@ class WebApi:
             return
         self._system(self._focus.command(argument))
 
+    # ---- day plan -----------------------------------------------------------------------
+    def _start_plan(self) -> None:
+        """Start the plan's nudge clock; its nudges show up as chat lines (and on the phone, through the phone service)."""
+        if self._plan is None:
+            return
+        def show(nudge) -> None:
+            hint = f" Type /focus {nudge.focus_minutes}, {nudge.focus_goal} to start a round." if nudge.focus_block is not None else ""
+            self._system(nudge.text + hint)
+
+        self._plan.add_listener(show)
+        try:
+            self._plan.start()
+        except Exception:
+            logger.exception("Plan service failed to start")
+
+    def _command_plan(self, argument: str) -> None:
+        if self._plan is None:
+            self._system("Day planning is switched off (MIKI_PLAN=0).")
+            return
+        self._system(self._plan.command(argument))
+
     def _command_phone(self, argument: str) -> None:
         phone = self._phone
         if phone is None:
@@ -217,7 +255,11 @@ class WebApi:
         """Open a conversation in Gmail. The id is validated and the URL built here, never taken from the page."""
         if not re.fullmatch(r"[0-9a-fA-F]{6,32}", str(thread_id or "")):
             return False
-        return bool(webbrowser.open(gmail_url(str(thread_id), self._mail_account)))
+        url = gmail_url(str(thread_id), self._mail_account)
+        open_remote = getattr(self._window, "open_url", None)
+        if callable(open_remote):  # the brain runs on the server: the browser to open is the laptop's
+            return bool(open_remote(url))
+        return bool(webbrowser.open(url))
 
     def dismiss_mail(self, message_id: str) -> None:
         """Hide an item in Miki only; the mailbox itself is never modified."""
@@ -282,6 +324,8 @@ class WebApi:
             self._command_phone(argument)
         elif command == "focus":
             self._command_focus(argument)
+        elif command == "plan":
+            self._run_background(self._command_plan, argument)  # the AI reads it and the calendar is asked: a few seconds
         elif command == "forget" and manager is not None:
             self._system(mc.forget(self._core, argument))
             self._update_widgets()
@@ -305,6 +349,7 @@ class WebApi:
                 "/mail               the emails that need your attention, and why\n"
                 "/phone              link Miki to your phone (Telegram)\n"
                 "/focus [1 hour|50 min, finish lecture 6|stop] study mode: Gemini + Claude on your screens, distractions blocked, a break, a daily recap (also /focus today, /focus habits)\n"
+                "/plan <your day>    plan the day in plain English, e.g. /plan study 5h linear algebra, 3h calculus, 50 min lunch, gym, home by 8pm (then /plan ok, /plan cancel, /plan places, /plan remember <travel times>)\n"
                 "/profile [refresh]  who I think you are, and what I don't know yet\n"
                 "/interview          I ask you questions to get to know you (skip / stop anytime)\n"
                 "/brain              how connected my memory is\n"
@@ -453,12 +498,8 @@ class WebApi:
             bubble_id = str(datetime.now().timestamp())
             self._js(f"createAssistantBubble({json.dumps(bubble_id)})")
             with self._core_lock:
-                response, _memory_created = self._core.process_user_input(text)
+                response, _memory_created = self._core.process_user_input(text, on_memories=self._learned)
             self._js(f"updateAssistantBubble({json.dumps(bubble_id)}, {json.dumps(response)})")
-            saved = list(getattr(self._core, "last_memories", None) or [])
-            if saved:
-                self._toast(saved)
-                self._maybe_refresh_profile_async()
             speaking_seconds = min(6.0, max(1.5, len(response) * 0.03))
         except Exception as exc:
             logger.exception("Miki failed to process message")
@@ -468,6 +509,12 @@ class WebApi:
             if speaking_seconds:
                 self._speak_for(speaking_seconds)
             self._update_widgets()
+
+    def _learned(self, memories) -> None:
+        """The background memory pipeline filed something from the last message (a few seconds after the reply)."""
+        self._toast(memories)
+        self._maybe_refresh_profile_async()
+        self._refresh_widget("memory")
 
     def _speak_for(self, seconds: float) -> None:
         self._face_state = "speaking"
@@ -550,9 +597,12 @@ class WebApi:
                         current_frame = seq[frame_idx]
 
             # Only push to the page when something actually changed; the bob is animated in JS.
-            if last_sent is not None and last_sent[0] is current_frame and last_sent[1] == state:
+            if last_sent is not None and last_sent[0] is current_frame and last_sent[1] == state and not self._face_resend:
                 continue
+            self._face_resend = False
             last_sent = (current_frame, state)
+            if not self._page_open:
+                continue
 
             eye_l, eye_r, mouth, _ = current_frame
             grid = _compose_face_frame(eye_l, eye_r, mouth)
@@ -565,8 +615,9 @@ class WebApi:
     def _update_widgets_loop(self):
         import time
         while True:
-            self._update_widgets()
-            time.sleep(300)  # also refreshed after every chat message
+            if self._page_open:  # on the server nobody may be looking: don't poll Google for an empty room
+                self._update_widgets()
+            time.sleep(300)  # also refreshed after every chat message, and when a dashboard connects
 
     def _set_widget(self, element_id: str, content: str) -> None:
         self._js(f"document.getElementById({json.dumps(element_id)}).innerHTML = {json.dumps(content)};")
@@ -702,55 +753,9 @@ class WebApi:
 
 
 
-# Chromium switches that keep the embedded browser lean. Measured on this app: software rendering
-# (--disable-gpu) drops the WebView2 GPU process from ~200 MB to ~30 MB private memory, and the
-# page is static at idle so it costs almost no CPU. Set MIKI_GPU=1 to use the GPU anyway, or set
-# WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS yourself to override everything.
-_WEBVIEW2_LEAN_ARGS = (
-    "--renderer-process-limit=1 "
-    "--disable-features=Translate,MediaRouter,OptimizationHints,msSmartScreenProtection "
-    "--disable-background-networking --disable-component-update --disable-sync "
-    '--js-flags="--lite-mode --max-old-space-size=64"'
-)
-
-
-def configure_webview2() -> None:
-    if "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS" in os.environ:
-        return
-    use_gpu = os.getenv("MIKI_GPU", "").strip().lower() in {"1", "true", "yes"}
-    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = ("" if use_gpu else "--disable-gpu ") + _WEBVIEW2_LEAN_ARGS
-
-
-def _webview_profile_dir() -> Path:
-    """A fixed browser profile (instead of a fresh temp dir every launch), so Google Fonts and other
-    cached assets survive restarts and nothing accumulates in %TEMP%."""
-    path = Path("data/webview").resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def create_local_server():
-    import http.server
-    import socketserver
-    import os
-    
-    web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
-    
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=web_dir, **kwargs)
-            
-        def log_message(self, format, *args):
-            pass
-            
-    class ThreadingHTTPServer(socketserver.TCPServer):
-        allow_reuse_address = True
-
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    port = httpd.server_address[1]
-    return httpd, port
-
 def run_gui() -> int:
+    import webview
+
     configure_webview2()
     httpd, port = create_local_server()
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -760,11 +765,13 @@ def run_gui() -> int:
 
     api = WebApi(core, brain)
     api._focus = build_focus_service(core=core)
+    api._plan = build_plan_service(core, focus=api._focus)
     api._phone = build_phone_service(
-        core, runtime.settings, openai_client=runtime.openai_client, lock=api._core_lock, hooks=api.phone_hooks(), focus=api._focus
+        core, runtime.settings, openai_client=runtime.openai_client, lock=api._core_lock, hooks=api.phone_hooks(), focus=api._focus,
+        plan=api._plan,
     )
     window = webview.create_window(
-        'Miki Command Center',
+        WINDOW_TITLE,
         url=f'http://127.0.0.1:{port}/index.html',
         width=1440,
         height=920,

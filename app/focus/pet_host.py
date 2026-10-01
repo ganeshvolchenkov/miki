@@ -37,10 +37,12 @@ class PetHost:
         with self._lock:
             if self.running:
                 return True
+            # From source: python -m app.focus.pet. From the packaged Miki.exe (one file, no python): Miki.exe --pet.
+            launcher = [sys.executable, "--pet"] if getattr(sys, "frozen", False) else [sys.executable, "-m", "app.focus.pet"]
             try:
                 self._proc = subprocess.Popen(
-                    [sys.executable, "-m", "app.focus.pet", "--x", str(floor.x), "--y", str(floor.bottom - STRIP_HEIGHT),
-                     "--w", str(floor.w), "--h", str(STRIP_HEIGHT)],
+                    launcher + ["--x", str(floor.x), "--y", str(floor.bottom - STRIP_HEIGHT),
+                                "--w", str(floor.w), "--h", str(STRIP_HEIGHT)],
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
                     cwd=str(self._project), creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 )

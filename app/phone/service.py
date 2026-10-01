@@ -51,9 +51,11 @@ class PhoneService:
         state: PhoneState | None = None,
         watch_seconds: float = DEFAULT_WATCH_SECONDS,
         focus: Any = None,
+        plan: Any = None,
     ) -> None:
         self.core = core
         self.focus = focus
+        self.plan = plan
         self.hooks = hooks or PhoneHooks()
         self.api = api or TelegramApi(settings.telegram_bot_token or "")
         self.state = state or PhoneState()
@@ -64,12 +66,14 @@ class PhoneService:
             core, lock=lock, mail=self.mail, openai_client=openai_client, transcribe_model=settings.transcribe_model,
             tts_model=settings.tts_model, tts_voice=settings.tts_voice, hooks=self.hooks,
         )
-        self.bot = PhoneBot(self.api, self.state, self.backend, hooks=self.hooks, quiet_default=settings.quiet_hours, focus=focus)
+        self.bot = PhoneBot(self.api, self.state, self.backend, hooks=self.hooks, quiet_default=settings.quiet_hours, focus=focus, plan=plan)
         self.notifier = PhoneNotifier(
             self.api, self.state, quiet_hours=settings.quiet_hours, hold=(lambda: focus.is_focusing) if focus is not None else (lambda: False)
         )
         if focus is not None:
             focus.add_listener(self._focus_event)
+        if plan is not None:
+            plan.add_listener(self._plan_nudge)
         self._watch_seconds = float(os.getenv("MIKI_MAIL_WATCH_SECONDS", "") or watch_seconds)
         self._stop = threading.Event()
         self._owns_bot = False
@@ -134,6 +138,12 @@ class PhoneService:
         ask_goal = bool(summary.get("goal")) and summary.get("goal_done") is None
         screen = ui.focus_event_screen(event.kind, event.text, self.focus.config.minutes, ask_goal=event.kind == "time_up" and ask_goal)
         self.notifier.send(screen.text, key=None, buttons=screen.buttons, direct=True)
+
+    def _plan_nudge(self, nudge: Any) -> None:
+        """Your day plan's nudges (time to leave, a subject starting). You asked for them, so like focus timers they
+        go out at once; each one only once."""
+        buttons = ui.plan_nudge_buttons(nudge.focus_block, nudge.focus_minutes) if self.focus is not None else None
+        self.notifier.send(ui.esc(nudge.text), key=nudge.key, buttons=buttons, direct=True)
 
     # ------------------------------------------------------------------ dashboard helpers
     def status(self) -> PhoneStatus:

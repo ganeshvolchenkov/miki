@@ -57,6 +57,7 @@ must never run a second brain; `app/main.py` and `app/headless.py` enforce that 
 | Focus timeline, recap, habits memory | server | `app/focus/service.py`, `session.py`, `recap.py`, `habits.py`, `memory.py` |
 | Day planner `/plan` (reader, scheduler, calendar, nudges) | server | `app/plan/` (`request.py` AI → checked JSON, `schedule.py` pure scheduler, `service.py`, `store.py`) |
 | Mail + photo reader (dates → calendar, tasks → texts/reminders, facts → memory) | server | `app/inbox/` (`findings.py` checks the AI's JSON, `reader.py` prompts + vision OCR, `service.py` acts, undo, reminders); wired in `PhoneService`; photos handled in `bot.py` `_on_photo`, undo button `ib:undo:<batch>` |
+| Secretary (morning briefing, evening check-in, behind-plan catch-up, leave-now/heads-up alerts, Sunday review) | server | `app/secretary/` (`radar.py` calendar reading, `service.py` builds and sends, `tick()` from the phone watcher); buttons `sec:<action>` in `bot.py`; plans it offers come from `PlanService.draft_from_json` (no AI) |
 | Focus screen work (windows, bouncer, pet) | laptop | `app/focus/desk.py`, `guard.py`, `chrome.py`, `winapi.py`, `pet.py`, `pet_host.py`, run by `app/hands/agent.py` |
 | The link | both | `app/link/protocol.py`, `hub.py` (server), `client.py` + `tunnel.py` (laptop), `remote.py` (server-side stand-ins) |
 | Obsidian vault | server (synced to laptop by Syncthing) | `app/memory/obsidian.py`, `brain.py` |
@@ -156,6 +157,7 @@ Every setting the code reads (grep `os.getenv` to refresh this list):
 | Memory / RAG | `OBSIDIAN_VAULT_PATH` (must exist, `obsidian/` on the server), `MIKI_MEMORY_INTELLIGENCE_ENABLED`, `MIKI_MEMORY_CANDIDATE_THRESHOLD`, `MIKI_MEMORY_CONFIDENT_THRESHOLD`, `MIKI_RAG_ENABLED`, `MIKI_RAG_TOP_K`, `MIKI_RAG_CHUNK_SIZE`, `MIKI_RAG_CHUNK_OVERLAP`, `MIKI_RAG_SIMILARITY_THRESHOLD`, `MIKI_RAG_INDEX_PATH` |
 | Phone | `TELEGRAM_BOT_TOKEN`, `MIKI_PHONE`, `MIKI_QUIET_HOURS` (`23:00-08:00`), `MIKI_MAIL_WATCH_SECONDS`, `MIKI_MAIL_TRIAGE`, `MIKI_PHONE_CLEANUP_HOURS` (24: Miki deletes chat messages, yours and its own, once this old; `0` keeps everything. Telegram only lets a bot delete messages under 48 h old, and only ones the bot saw after this was deployed) |
 | Tools | `MIKI_TOOLS_ENABLED`, `MIKI_CALENDAR_ENABLED`, `MIKI_CALENDAR_REQUIRE_CREATE_CONFIRMATION`, `MIKI_GOOGLE_CALENDAR_ID`, `MIKI_GOOGLE_CREDENTIALS_PATH`, `MIKI_GOOGLE_TOKEN_PATH`, `MIKI_GOOGLE_DRIVE_FOLDER_NAME`, `MIKI_GOOGLE_MAPS_API_KEY`, `MIKI_WEATHER_ENABLED`, `WEATHER_PROVIDER`, `WEATHER_API_KEY`, `WEATHER_DEFAULT_LOCATION`, `WEATHER_UNITS`, `WEATHER_CACHE_TTL_SECONDS` |
+| Secretary | `MIKI_SECRETARY` (on). Phone prefs (Settings): `secretary`, `morning_brief`, `brief_time` (07:30), `evening_review`, `evening_time` (21:00), `weekly_review`, `catchup`, `leave_alerts` |
 | Inbox | `MIKI_INBOX` (on), `MIKI_INBOX_MODEL` (`gpt-4.1-mini`: reads mail and photos) |
 | Plan | `MIKI_PLAN` (on), `MIKI_PLAN_MODEL` (`gpt-4.1-mini`: reads requests; nano was tested and drops items) |
 | Focus (server reads the timing ones, laptop reads the screen ones) | `MIKI_FOCUS`, `MIKI_FOCUS_MINUTES`, `MIKI_FOCUS_BREAK_MINUTES`, `MIKI_FOCUS_RECAP_TIME`, `MIKI_FOCUS_BAN` (server), `MIKI_FOCUS_SCREEN1_URL`, `MIKI_FOCUS_SCREEN2_URL`, `MIKI_FOCUS_SWAP_SCREENS`, `MIKI_CHROME_PATH`, `MIKI_FOCUS_PORT` (laptop) |
@@ -179,6 +181,7 @@ Every setting the code reads (grep `os.getenv` to refresh this list):
 | `data/mail_triage.json`, `data/mail_dismissed.json` | triage cache, dismissed/snoozed mail | |
 | `data/focus.json` (+ `.bak`, `.corrupt`), `data/focus_log.jsonl` | focus rounds, stats, bans; append-only round log | move from laptop once with `scp` |
 | `data/plan.json` (+ `.corrupt`) | `/plan`: your places (travel times, usual lengths, study place), the draft, the active plan (its calendar event ids, which nudges went out) | Atomic writes. Deleting it forgets the places. Miki's calendar events carry "Planned by Miki (/plan)." in their description. |
+| `data/secretary.json` (+ `.corrupt`) | what was already sent (dedupe), retry times, your "usual day" (last locked-in request), leftover study to carry over, daily counters | Atomic writes. Delete it and Miki may repeat today's briefing. |
 | `data/inbox.json` (+ `.corrupt`) | read mail ids, undo batches (calendar event ids Miki added on its own), pending reminders, notices held back by quiet hours | Atomic writes. Events Miki adds carry "Added by Miki from …" in their description. |
 | `data/google_calendar/credentials.json`, `token.json` | Google OAuth | Consent screen must be **published**, or the refresh token dies after 7 days. |
 | `data/backups/` | vault backups before graph rebuilds | |

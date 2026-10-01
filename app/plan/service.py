@@ -273,6 +273,20 @@ class PlanService:
             text += f"\n🧠 Noted for next time: {learned}."
         return PlanReply(True, text, "draft")
 
+    def draft_from_json(self, request_json: dict[str, Any], *, day: str = "today") -> PlanReply:
+        """A draft straight from a saved request (the secretary's "same as usual", "plan tomorrow", "re-plan the rest"):
+        no AI involved, so it is exact. ``day`` is "today" or "tomorrow"."""
+        request = req.parse(request_json)
+        if request is None or not (request.wishes or request.skip):
+            return PlanReply(False, "I don't have anything to plan from.")
+        request.day_offset = 1 if day == "tomorrow" else 0
+        if request.day_offset:
+            request.start = request.start if request.start is not None else None
+        with self._lock:
+            plan = self._build(request, self._now(), "", None)
+            self.store.put("draft", plan)
+        return PlanReply(True, plan_text(plan), "draft")
+
     def _task(self, wish: req.Wish, book: Book, notes: list[str], has_study: bool) -> Task:
         meal = req.meal_kind(wish.title)
         length = wish.minutes

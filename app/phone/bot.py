@@ -87,7 +87,9 @@ class PhoneBot:
         focus: Any = None,
         plan: Any = None,
         inbox: Any = None,
+        secretary: Any = None,
     ) -> None:
+        self.secretary = secretary  # the SecretaryService: what its buttons do
         self.inbox = inbox  # the InboxService: reads photos you send (and mail, in the background)
         self.focus = focus  # the FocusService, if focus mode is available
         self.plan = plan  # the PlanService (/plan), if day planning is available
@@ -525,10 +527,19 @@ class PhoneBot:
             "quiet_hours": str(self.state.pref("quiet_hours", self.quiet_default)),
             "morning_brief": bool(self.state.pref("morning_brief")),
             "brief_time": str(self.state.pref("brief_time")),
+            "secretary": bool(self.state.pref("secretary")),
+            "evening_review": bool(self.state.pref("evening_review")),
+            "evening_time": str(self.state.pref("evening_time")),
             "voice_replies": bool(self.state.pref("voice_replies")),
         }
 
     def _brief_screen(self) -> ui.Screen:
+        if self.secretary is not None:  # the same briefing the secretary sends each morning, on request
+            try:
+                notice = self.secretary.build_brief()
+                return ui.Screen(ui.esc(notice.text), (ui.secretary_buttons(notice.actions) or []) + _HOME_BUTTON)
+            except Exception:
+                logger.debug("Secretary brief failed; using the plain one", exc_info=True)
         data = self.backend.home_data(self.state.owner_name)
         try:
             _, events = self.backend.day_events(0)
@@ -599,9 +610,9 @@ class PhoneBot:
             self._send(chat_id, f"✅ {result}" if result.startswith("Remembered") else result, mode="plain")
         elif kind == "event":
             self._on_chat(chat_id, f"Add this to my calendar: {text}", message_id)
-        elif kind == "plan" and self.plan is not None:
+        elif kind in {"plan", "plannew"} and self.plan is not None:
             with self._typing(chat_id):
-                reply = self.plan.make(text)
+                reply = self.plan.make(text, fresh=kind == "plannew")
             self._plan_reply(chat_id, reply)
         else:
             self._on_chat(chat_id, text, message_id)
@@ -671,6 +682,22 @@ class PhoneBot:
         finally:
             self._react(chat_id, message_id, None)
 
+    def _secretary_callback(self, chat_id: int, message_id: int | None, rest: str) -> str:
+        """A button under one of the secretary's messages (plan my day, same as usual, plan tomorrow, re-plan the rest)."""
+        if self.secretary is None:
+            return ""
+        self._clear_buttons(chat_id, message_id)
+        with self._typing(chat_id):
+            result = self.secretary.action(rest)
+        if result.ask:
+            self._awaiting = result.ask
+            self._send(chat_id, ui.PROMPTS[result.ask][0], mode="html", reply_markup=ui.prompt_markup(result.ask))
+        elif result.reply is not None:
+            self._plan_reply(chat_id, result.reply)
+        elif result.text:
+            self._send(chat_id, result.text, mode="plain")
+        return ""
+
     def _inbox_callback(self, chat_id: int, message_id: int | None, rest: str) -> str:
         action, _, batch = rest.partition(":")
         if self.inbox is None or action != "undo" or not re.fullmatch(r"[0-9a-f]{6,16}", batch):
@@ -738,6 +765,8 @@ class PhoneBot:
             return self._plan_callback(chat_id, message_id, rest)
         if kind == "ib":
             return self._inbox_callback(chat_id, message_id, rest)
+        if kind == "sec":
+            return self._secretary_callback(chat_id, message_id, rest)
         if kind == "cf" and rest in {"yes", "no"}:
             if message_id is not None:
                 self.api.remove_buttons(chat_id, message_id)
@@ -797,6 +826,10 @@ class PhoneBot:
                 self.state.set_flag("mail_baselined", False)  # don't flood with what piled up while it was off
         elif name == "brief":
             self.state.set_pref("morning_brief", not self.state.pref("morning_brief"))
+        elif name == "secretary":
+            self.state.set_pref("secretary", not self.state.pref("secretary"))
+        elif name == "evening":
+            self.state.set_pref("evening_review", not self.state.pref("evening_review"))
         elif name == "voice":
             self.state.set_pref("voice_replies", not self.state.pref("voice_replies"))
         elif name == "quiet" and value in {preset for preset, _ in ui.QUIET_PRESETS}:

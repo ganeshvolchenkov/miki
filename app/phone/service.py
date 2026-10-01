@@ -15,10 +15,11 @@ from app.core.config import Settings
 from app.core.mail_attention import MailAttention
 from app.core.mail_triage import MailTriage
 from app.inbox.service import build_inbox_service
+from app.secretary.service import build_secretary
 from app.phone.backend import CoreBackend, PhoneHooks
 from app.phone.bot import PhoneBot
 from app.phone import ui
-from app.phone.notifier import PhoneNotifier
+from app.phone.notifier import PhoneNotifier, in_quiet_hours
 from app.phone.state import PhoneState
 from app.phone.telegram_api import TelegramApi
 
@@ -77,8 +78,9 @@ class PhoneService:
             tts_model=settings.tts_model, tts_voice=settings.tts_voice, hooks=self.hooks,
         )
         self.inbox = build_inbox_service(core, openai_client)  # reads new mail and photos, acts on what's in them
+        self.secretary = build_secretary(core, self.backend, self.state, focus=focus, plan=plan)  # briefing, check-in, heads-ups
         self.bot = PhoneBot(self.api, self.state, self.backend, hooks=self.hooks, quiet_default=settings.quiet_hours, focus=focus, plan=plan,
-                            inbox=self.inbox)
+                            inbox=self.inbox, secretary=self.secretary)
         self.notifier = PhoneNotifier(
             self.api, self.state, quiet_hours=settings.quiet_hours, hold=(lambda: focus.is_focusing) if focus is not None else (lambda: False)
         )
@@ -88,6 +90,8 @@ class PhoneService:
             plan.add_listener(self._plan_nudge)
         if self.inbox is not None:
             self.inbox.add_listener(self._inbox_notice)
+        if self.secretary is not None:
+            self.secretary.add_listener(self._secretary_notice)
         self._watch_seconds = float(os.getenv("MIKI_MAIL_WATCH_SECONDS", "") or watch_seconds)
         self.cleanup_hours = _hours(os.getenv("MIKI_PHONE_CLEANUP_HOURS"), DEFAULT_CLEANUP_HOURS)  # 0 = never delete anything
         self.api.on_sent = self.state.track_message
@@ -127,7 +131,13 @@ class PhoneService:
                             self._read_new_mail(items)
                     except Exception:
                         logger.debug("Mail watch cycle failed", exc_info=True)
-                self.send_brief_if_due()
+                if self.secretary is not None:
+                    try:
+                        self.secretary.tick()
+                    except Exception:
+                        logger.exception("Secretary tick failed")
+                else:
+                    self.send_brief_if_due()
                 self.purge_old_messages()
                 if self.inbox is not None:
                     try:
@@ -186,6 +196,15 @@ class PhoneService:
         client = tool.get_client() if tool is not None else None
         fetch = getattr(client, "get_body", None)
         self.inbox.process_mail(items, fetch if fetch is not None else (lambda message_id: None))
+
+    def _secretary_notice(self, notice: Any) -> bool:
+        """The secretary's messages. Its briefing and check-in are at times you chose, so quiet hours don't hold them back;
+        heads-ups do wait. Nothing interrupts a focus round (it is tried again a few minutes later)."""
+        if self.notifier.hold():
+            return False
+        if notice.respect_quiet and in_quiet_hours(datetime.now(), str(self.state.pref("quiet_hours", self.notifier.quiet_hours))):
+            return False
+        return self.notifier.send(ui.esc(notice.text), key=None, buttons=ui.secretary_buttons(notice.actions), direct=True)
 
     def _inbox_notice(self, notice: Any) -> bool:
         """What Miki did from your mail (added to the calendar, something to do, a reminder). It waits out quiet hours."""

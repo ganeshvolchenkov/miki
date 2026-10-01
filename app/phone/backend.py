@@ -11,7 +11,7 @@ import logging
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from app.core.interview import Interview, InterviewTurn
@@ -260,6 +260,16 @@ class CoreBackend:
         if not result.success:
             raise RuntimeError(result.message or "I couldn't read your calendar.")
         return day, list((result.data or {}).get("events", []))
+
+    def calendar_range(self, start: date, days: int) -> list[dict[str, Any]] | None:
+        """Calendar events from ``start`` for ``days`` days (the secretary's view), or None if the calendar can't be read."""
+        tool = self.core.get_tool("calendar") if hasattr(self.core, "get_tool") else None
+        if tool is None or not tool.is_available():
+            return None
+        tz = local_utc_offset()
+        last = start + timedelta(days=max(1, days) - 1)
+        result = tool.execute("get_events", {"start": start.strftime("%Y-%m-%dT00:00:00") + tz, "end": last.strftime("%Y-%m-%dT23:59:59") + tz})
+        return list((result.data or {}).get("events", [])) if result.success else None
 
     def mail_items(self, *, force: bool = True) -> list[Any]:
         if self.mail is None:

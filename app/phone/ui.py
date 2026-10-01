@@ -261,7 +261,9 @@ def settings_screen(prefs: dict[str, Any], model: str) -> Screen:
         "⚙️ <b>Settings</b>\n\n"
         f"🔔 Urgent mail alerts: <b>{_onoff(prefs['urgent_push'])}</b>\n"
         f"🌙 Quiet hours: <b>{esc(quiet_text)}</b>\n"
+        f"🗓 Secretary: <b>{_onoff(prefs['secretary'])}</b> (heads-ups, catch-up, weekly review)\n"
         f"☀️ Morning brief: <b>{_onoff(prefs['morning_brief'])}</b> ({esc(prefs['brief_time'])})\n"
+        f"🌙 Evening check-in: <b>{_onoff(prefs['evening_review'])}</b> ({esc(prefs['evening_time'])})\n"
         f"🔊 Voice replies to voice notes: <b>{_onoff(prefs['voice_replies'])}</b>\n"
         f"🤖 Model: <code>{esc(model)}</code>"
     )
@@ -270,7 +272,8 @@ def settings_screen(prefs: dict[str, Any], model: str) -> Screen:
     buttons: Buttons = [
         [_b(f"🔔 Alerts: {_onoff(prefs['urgent_push'])}", "set:urgent"), _b(f"🔊 Voice: {_onoff(prefs['voice_replies'])}", "set:voice")],
         quiet_row,
-        [_b(f"☀️ Morning brief: {_onoff(prefs['morning_brief'])}", "set:brief")],
+        [_b(f"🗓 Secretary: {_onoff(prefs['secretary'])}", "set:secretary")],
+        [_b(f"☀️ Brief: {_onoff(prefs['morning_brief'])}", "set:brief"), _b(f"🌙 Check-in: {_onoff(prefs['evening_review'])}", "set:evening")],
         time_row,
         [_b("🤖 Change model", "nav:model"), *_home_row()],
     ]
@@ -300,6 +303,7 @@ PROMPTS: dict[str, tuple[str, str]] = {
     "event": ("📅 <b>What's the event?</b>\nFor example: <i>gym tomorrow 7–8:30pm at Trainmore</i>", "gym tomorrow 7pm…"),
     "remember": ("🧠 <b>What should I remember?</b>", "I'm allergic to…"),
     "chat": ("💬 <b>What's on your mind?</b>", "Ask me anything…"),
+    "plannew": ("📋 <b>How should today go?</b>\nFor example: <i>study 5 hours, 3 calculus and 2 linear algebra, gym, home by 8</i>", "study 5 hours, gym…"),
     "plan": ("✏️ <b>What should change?</b>\nFor example: <i>gym in the morning</i> or <i>only 2 hours of calculus</i>", "gym in the morning…"),
 }
 
@@ -386,6 +390,12 @@ def plan_cancel_confirm() -> Screen:
 def plan_nudge_buttons(block: int | None, minutes: int) -> Buttons | None:
     """A subject is starting: one tap starts a focus round for it."""
     return [[_b(f"▶️ Focus {minutes} min", f"pl:fc:{block}")]] if block is not None else None
+
+
+def secretary_buttons(actions: list[tuple[str, str]]) -> Buttons | None:
+    """Under a secretary message: the things it offers to do, two to a row."""
+    buttons = [_b(label, f"sec:{action}") for label, action in actions]
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)] or None
 
 
 def inbox_buttons(batch: str, link: str = "") -> Buttons | None:

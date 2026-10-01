@@ -28,8 +28,14 @@ MAX_TRACKED_MESSAGES = 3000
 
 DEFAULT_PREFS: dict[str, Any] = {
     "urgent_push": True,  # push urgent mail
-    "morning_brief": False,  # a daily summary at ``brief_time`` (opt-in)
-    "brief_time": "08:30",
+    "morning_brief": True,  # the secretary's morning briefing at ``brief_time``
+    "brief_time": "07:30",
+    "secretary": True,  # master switch: briefing, check-in, catch-up, heads-up, weekly review
+    "evening_review": True,
+    "evening_time": "21:00",
+    "weekly_review": True,
+    "catchup": True,  # "you're behind your plan" (at most twice a day)
+    "leave_alerts": True,  # "time to leave for the lecture" / "starts in 15 minutes"
     "voice_replies": True,  # answer voice notes with a voice note too
 }
 

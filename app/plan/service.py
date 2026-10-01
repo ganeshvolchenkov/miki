@@ -319,6 +319,8 @@ class PlanService:
             notes.append("I couldn't read your calendar, so I didn't plan around what's in it.")
         elif request.skip:
             for term in request.skip:
+                if any(term in w.title.lower() or (w.place and term == w.place) for w in request.wishes):
+                    continue  # "no gym" misread as a skip of something Miki was asked to plan: not about the calendar
                 if not any(_skip_matches(term, event["title"], event["start"]) for event in skipped):
                     notes.append(f"I couldn't find \"{term}\" in your calendar that day, so nothing was skipped for it.")
         has_study = any(w.kind == STUDY for w in request.wishes)

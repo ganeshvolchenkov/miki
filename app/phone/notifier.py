@@ -81,6 +81,8 @@ class PhoneNotifier:
         chat_id = self.state.chat_id
         if chat_id is None:
             return False
+        if in_quiet_hours(self._now(), str(self.state.pref("no_phone") or "")):
+            return False  # a window you asked to keep phone-free (meditation): even timers wait, and go out when it ends
         if key is not None and self.state.already_notified(key):
             return False
         if not direct:

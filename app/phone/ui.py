@@ -25,7 +25,7 @@ Buttons = list[list[dict[str, str]]]
 MEMORIES_PER_PAGE = 5
 
 QUIET_PRESETS: list[tuple[str, str]] = [("off", "Off"), ("23:00-08:00", "23–08"), ("22:00-07:00", "22–07"), ("00:00-09:00", "00–09")]
-BRIEF_TIMES = ["07:30", "08:30", "09:30"]
+BRIEF_TIMES = ["06:30", "07:30", "08:30"]
 
 # The keyboard pinned at the bottom of the chat (its buttons arrive as ordinary text messages).
 REPLY_KEYBOARD: dict[str, Any] = {

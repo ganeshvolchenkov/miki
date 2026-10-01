@@ -114,6 +114,35 @@ def test_the_calendar_is_planned_around(tmp_path):
     assert "10:00  📅 Lecture, until 12:00" in text and "Birthday" not in text
 
 
+def test_a_skipped_lecture_is_free_time_and_marked_on_your_own_calendar(tmp_path):
+    lecture = {"id": "x", "title": "MATH101 Lecture", "start": "2026-10-01T10:00:00", "end": "2026-10-01T12:00:00", "all_day": False}
+    reply = {"items": [{"kind": "study", "title": "Calculus", "minutes": 180}], "study_place": "home", "skip": ["lecture"]}
+    service, _, calendar, *_ = make(tmp_path, reply, calendar=FakeCalendar([lecture]))
+    text = service.make("3 hours of calculus at home, skip the lecture").text
+    assert "📅 MATH101 Lecture" not in text and "⏭ Skipping: MATH101 Lecture (10:00–12:00)" in text
+    service.confirm()
+    skipped = [e for e in calendar.created if e["title"] == "Skipped: MATH101 Lecture"]
+    assert len(skipped) == 1 and MARKER in skipped[0]["description"] and skipped[0]["start"].startswith("2026-10-01T10:00")
+    assert calendar.deleted == [] and service.store.get("active")["calendar_ids"].count(skipped[0]["id"]) == 1
+    service.cancel()
+    assert skipped[0]["id"] in calendar.deleted
+
+
+def test_skipping_something_not_in_the_calendar_says_so(tmp_path):
+    reply = {"items": [{"kind": "study", "title": "Calculus", "minutes": 60}], "study_place": "home", "skip": ["chemistry"]}
+    service, *_ = make(tmp_path, reply)
+    assert "couldn't find \"chemistry\"" in service.make("calculus, skip chemistry").text
+
+
+def test_a_skip_by_start_time(tmp_path):
+    lecture = {"id": "x", "title": "Lecture", "start": "2026-10-01T10:00:00", "end": "2026-10-01T12:00:00", "all_day": False}
+    other = {"id": "z", "title": "Lab", "start": "2026-10-01T14:00:00", "end": "2026-10-01T15:00:00", "all_day": False}
+    reply = {"items": [], "skip": ["10:00"]}
+    service, *_ = make(tmp_path, reply, calendar=FakeCalendar([lecture, other]))
+    assert service.make("skip my 10am").ok
+    assert [e["title"] for e in service.store.get("draft")["skipped"]] == ["Lecture"]
+
+
 def test_no_calendar_still_plans(tmp_path):
     service, *_ = make(tmp_path, calendar=FakeCalendar(available=False))
     service.make("the owner's day")

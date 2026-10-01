@@ -91,6 +91,45 @@ class GoogleMailClient:
         self._call(batch.execute)
         return [self._parse_metadata(fetched[i]) for i in ids if i in fetched]
 
+    def get_body(self, message_id: str) -> dict[str, Any] | None:
+        """One email's readable text (plain text, else the HTML with tags stripped), for the assistant to read."""
+        message = self._call(lambda: self._service.users().messages().get(userId="me", id=message_id, format="full").execute(),
+                             not_found_returns_none=True)
+        if not message:
+            return None
+        return {"id": message["id"], "body": self._body_text(message.get("payload") or {}), "snippet": message.get("snippet", "")}
+
+    @staticmethod
+    def _body_text(payload: dict[str, Any]) -> str:
+        import base64
+        import html
+        import re
+
+        def decode(part: dict[str, Any]) -> str:
+            data = (part.get("body") or {}).get("data")
+            if not data:
+                return ""
+            try:
+                return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", errors="replace")
+            except (ValueError, TypeError):
+                return ""
+
+        def walk(part: dict[str, Any], mime: str, depth: int = 0) -> list[str]:
+            found = [decode(part)] if part.get("mimeType") == mime else []
+            if depth < 6:
+                for child in part.get("parts") or []:
+                    found += walk(child, mime, depth + 1)
+            return found
+
+        plain = "\n".join(t for t in walk(payload, "text/plain") if t.strip())
+        if plain.strip():
+            return plain.strip()[:20000]
+        markup = "\n".join(walk(payload, "text/html"))
+        markup = re.sub(r"(?is)<(script|style).*?</\1>", " ", markup)
+        markup = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>|</li>", "\n", markup)
+        text = html.unescape(re.sub(r"<[^>]+>", " ", markup))
+        return re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n", text)).strip()[:20000]
+
     def profile_email(self) -> str:
         """The signed-in Gmail address (used to build links that open in the right account)."""
         if not getattr(self, "_profile_email", None):

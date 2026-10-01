@@ -14,6 +14,7 @@ from app.core import single_instance
 from app.core.config import Settings
 from app.core.mail_attention import MailAttention
 from app.core.mail_triage import MailTriage
+from app.inbox.service import build_inbox_service
 from app.phone.backend import CoreBackend, PhoneHooks
 from app.phone.bot import PhoneBot
 from app.phone import ui
@@ -66,7 +67,9 @@ class PhoneService:
             core, lock=lock, mail=self.mail, openai_client=openai_client, transcribe_model=settings.transcribe_model,
             tts_model=settings.tts_model, tts_voice=settings.tts_voice, hooks=self.hooks,
         )
-        self.bot = PhoneBot(self.api, self.state, self.backend, hooks=self.hooks, quiet_default=settings.quiet_hours, focus=focus, plan=plan)
+        self.inbox = build_inbox_service(core, openai_client)  # reads new mail and photos, acts on what's in them
+        self.bot = PhoneBot(self.api, self.state, self.backend, hooks=self.hooks, quiet_default=settings.quiet_hours, focus=focus, plan=plan,
+                            inbox=self.inbox)
         self.notifier = PhoneNotifier(
             self.api, self.state, quiet_hours=settings.quiet_hours, hold=(lambda: focus.is_focusing) if focus is not None else (lambda: False)
         )
@@ -74,6 +77,8 @@ class PhoneService:
             focus.add_listener(self._focus_event)
         if plan is not None:
             plan.add_listener(self._plan_nudge)
+        if self.inbox is not None:
+            self.inbox.add_listener(self._inbox_notice)
         self._watch_seconds = float(os.getenv("MIKI_MAIL_WATCH_SECONDS", "") or watch_seconds)
         self._stop = threading.Event()
         self._owns_bot = False
@@ -108,9 +113,15 @@ class PhoneService:
                         items = self.mail.refresh(force=True)
                         if items is not None:
                             self.notifier.notify_mail(items, self.mail.account)
+                            self._read_new_mail(items)
                     except Exception:
                         logger.debug("Mail watch cycle failed", exc_info=True)
                 self.send_brief_if_due()
+                if self.inbox is not None:
+                    try:
+                        self.inbox.tick()
+                    except Exception:
+                        logger.exception("Inbox tick failed")
             self._stop.wait(min(60.0, self._watch_seconds))
 
     def send_brief_if_due(self, now: datetime | None = None) -> bool:
@@ -138,6 +149,19 @@ class PhoneService:
         ask_goal = bool(summary.get("goal")) and summary.get("goal_done") is None
         screen = ui.focus_event_screen(event.kind, event.text, self.focus.config.minutes, ask_goal=event.kind == "time_up" and ask_goal)
         self.notifier.send(screen.text, key=None, buttons=screen.buttons, direct=True)
+
+    def _read_new_mail(self, items: list[Any]) -> None:
+        """New important mail: Miki reads it, adds its dates to the calendar and texts you what to do."""
+        if self.inbox is None:
+            return
+        tool = self.core.get_tool("mail") if hasattr(self.core, "get_tool") else None
+        client = tool.get_client() if tool is not None else None
+        fetch = getattr(client, "get_body", None)
+        self.inbox.process_mail(items, fetch if fetch is not None else (lambda message_id: None))
+
+    def _inbox_notice(self, notice: Any) -> bool:
+        """What Miki did from your mail (added to the calendar, something to do, a reminder). It waits out quiet hours."""
+        return self.notifier.send(ui.esc(notice.text), key=notice.key, buttons=ui.inbox_buttons(notice.batch, notice.link))
 
     def _plan_nudge(self, nudge: Any) -> None:
         """Your day plan's nudges (time to leave, a subject starting). You asked for them, so like focus timers they

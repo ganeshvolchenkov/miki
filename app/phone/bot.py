@@ -85,7 +85,9 @@ class PhoneBot:
         sleep: Callable[[float], None] = time.sleep,
         focus: Any = None,
         plan: Any = None,
+        inbox: Any = None,
     ) -> None:
+        self.inbox = inbox  # the InboxService: reads photos you send (and mail, in the background)
         self.focus = focus  # the FocusService, if focus mode is available
         self.plan = plan  # the PlanService (/plan), if day planning is available
         self.api = api
@@ -205,6 +207,8 @@ class PhoneBot:
         message_id = message.get("message_id")
         if message.get("voice") or message.get("audio"):
             self._on_voice(chat_id, message.get("voice") or message.get("audio"), message_id)
+        elif message.get("photo") or str((message.get("document") or {}).get("mime_type", "")).startswith("image/"):
+            self._on_photo(chat_id, message, message_id)
         elif text in ui.KEYBOARD_LABELS:
             self._awaiting = None
             self._open(chat_id, ui.KEYBOARD_LABELS[text])
@@ -606,6 +610,44 @@ class PhoneBot:
         finally:
             self._react(chat_id, message_id, None)
 
+    # ------------------------------------------------------------------ photos
+    def _on_photo(self, chat_id: int, message: dict[str, Any], message_id: int | None) -> None:
+        """A picture (or an image file): Miki reads it, puts its dates in your calendar and remembers it."""
+        if self.inbox is None:
+            self._send(chat_id, "I can't read pictures right now.", mode="plain")
+            return
+        document = message.get("document") or {}
+        if message.get("photo"):  # Telegram sends several sizes, smallest first: the last is the best
+            best = max((p for p in message["photo"] if isinstance(p, dict) and p.get("file_id")), key=lambda p: int(p.get("file_size") or 0), default=None)
+            file_id, mime = (best or {}).get("file_id"), "image/jpeg"
+        else:
+            file_id, mime = document.get("file_id"), str(document.get("mime_type") or "image/jpeg")
+        if not file_id or mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            self._send(chat_id, "I can read JPEG, PNG or WebP pictures.", mode="plain")
+            return
+        self._react(chat_id, message_id, "👀")
+        try:
+            try:
+                with self._typing(chat_id):
+                    reply = self.inbox.read_photo(self.api.download_file(str(file_id)), mime, str(message.get("caption") or "")[:300])
+            except Exception as exc:
+                logger.warning("Photo failed: %s", exc)
+                self._send(chat_id, "I couldn't read that picture.", mode="plain")
+                return
+            self._send(chat_id, reply.text, mode="plain", buttons=ui.inbox_buttons(reply.batch, reply.link))
+        finally:
+            self._react(chat_id, message_id, None)
+
+    def _inbox_callback(self, chat_id: int, message_id: int | None, rest: str) -> str:
+        action, _, batch = rest.partition(":")
+        if self.inbox is None or action != "undo" or not re.fullmatch(r"[0-9a-f]{6,16}", batch):
+            return ""
+        self._clear_buttons(chat_id, message_id)
+        with self._typing(chat_id):
+            text = self.inbox.undo(batch)
+        self._send(chat_id, text, mode="plain")
+        return ""
+
     def _speak(self, chat_id: int, text: str) -> bool:
         try:
             self.api.send_chat_action(chat_id, "record_voice")
@@ -661,6 +703,8 @@ class PhoneBot:
             return self._focus_callback(chat_id, message_id, rest)
         if kind == "pl":
             return self._plan_callback(chat_id, message_id, rest)
+        if kind == "ib":
+            return self._inbox_callback(chat_id, message_id, rest)
         if kind == "cf" and rest in {"yes", "no"}:
             if message_id is not None:
                 self.api.remove_buttons(chat_id, message_id)

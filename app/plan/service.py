@@ -130,6 +130,8 @@ def plan_text(plan: dict[str, Any], now_minute: int | None = None) -> str:
     if plan.get("home_at") is not None:
         summary.append(f"home at {hm(plan['home_at'])}")
     lines += ["", " · ".join(summary)] if summary else []
+    if plan.get("skipped"):
+        lines += [""] + [f"⏭ Skipping: {e['title']} ({hm(e['start'])}–{hm(e['end'])})" for e in plan["skipped"]]
     if plan.get("problems"):
         lines += ["", "⚠️ This doesn't fit: " + "; ".join(plan["problems"]) + "."]
         if plan.get("ways"):
@@ -255,7 +257,7 @@ class PlanService:
             if request is None:
                 return PlanReply(False, "I couldn't make a plan out of that.\n" + USAGE)
             learned = self._learn(request.facts)
-            if not request.wishes:
+            if not request.wishes and not request.skip:
                 if learned:
                     return PlanReply(True, f"🧠 Noted: {learned}.")
                 return PlanReply(False, "I didn't find anything to plan there.\n" + USAGE)
@@ -292,9 +294,13 @@ class PlanService:
         start_place = request.start_place or HOME
         if request.start_place is None and request.day_offset == 0:
             notes.append("I assumed you're at home now. If not, say e.g. \"I'm at school\".")
-        busy, calendar_ok = self._busy(day)
+        busy, calendar_ok, skipped = self._busy(day, request.skip)
         if not calendar_ok:
             notes.append("I couldn't read your calendar, so I didn't plan around what's in it.")
+        elif request.skip:
+            for term in request.skip:
+                if not any(_skip_matches(term, event["title"], event["start"]) for event in skipped):
+                    notes.append(f"I couldn't find \"{term}\" in your calendar that day, so nothing was skipped for it.")
         tasks = [self._task(w, book, notes) for w in request.wishes]
         config = getattr(self.focus, "config", None)
         plan_input = Day(
@@ -312,7 +318,7 @@ class PlanService:
             "blocks": [b.to_dict() for b in schedule.blocks],
             "problems": schedule.problems, "ways": [text for text, _ in ways_to_fit(plan_input, schedule)], "notes": notes,
             "study_minutes": schedule.study_minutes, "travel": schedule.travel, "home_at": schedule.home_at,
-            "calendar_ids": [], "nudged": [],
+            "skipped": skipped, "calendar_ids": [], "nudged": [],
         }
 
     # ------------------------------------------------------------------ places you taught Miki
@@ -375,22 +381,25 @@ class PlanService:
             logger.debug("Plan: calendar unavailable", exc_info=True)
             return None
 
-    def _busy(self, day: date) -> tuple[list[tuple[int, int, str]], bool]:
-        """What's already in the calendar that day, as (start, end, title) in minutes. Miki's own plan blocks don't count."""
+    def _busy(self, day: date, skip: list[str] | None = None) -> tuple[list[tuple[int, int, str]], bool, list[dict[str, Any]]]:
+        """What's already in the calendar that day, as (start, end, title) in minutes. Miki's own plan blocks don't count,
+        and neither do events you said you'd skip (a lecture on a read-only calendar can't be deleted, so it's set aside
+        here and ``confirm`` marks the slot on your own calendar). Third value: the skipped events, as plan data."""
         tool = self._calendar_tool()
         if tool is None:
-            return [], self._calendar is None  # no calendar set up at all isn't worth a warning
+            return [], self._calendar is None, []  # no calendar set up at all isn't worth a warning
         midnight = datetime.combine(day, dtime.min).astimezone()
         try:
             result = tool.execute("get_events", {"start": midnight.isoformat(), "end": (midnight + timedelta(days=1)).isoformat()})
         except Exception:
             logger.warning("Plan: reading the calendar failed", exc_info=True)
-            return [], False
+            return [], False, []
         if not result.success:
-            return [], False
+            return [], False, []
         active = self.store.get("active") or {}
         own = set(active.get("calendar_ids") or [])
-        busy = []
+        busy: list[tuple[int, int, str]] = []
+        skipped: list[dict[str, Any]] = []
         for event in (result.data or {}).get("events", []):
             if event.get("all_day") or event.get("id") in own or MARKER in str(event.get("description") or ""):
                 continue
@@ -399,9 +408,14 @@ class PlanService:
             except (KeyError, TypeError, ValueError):
                 continue
             start, end = max(0, start), min(24 * 60, end)
-            if end > start:
-                busy.append((start, end, str(event.get("title") or "Busy")[:60]))
-        return busy, True
+            if end <= start:
+                continue
+            title = str(event.get("title") or "Busy")[:60]
+            if any(_skip_matches(term, title, start) for term in skip or []):
+                skipped.append({"title": title, "start": start, "end": end})
+            else:
+                busy.append((start, end, title))
+        return busy, True, skipped
 
     def _add_to_calendar(self, plan: dict[str, Any]) -> tuple[list[str], str]:
         tool = self._calendar_tool()
@@ -417,6 +431,19 @@ class PlanService:
                 event_id = ((result.data or {}).get("event") or {}).get("id") if result.success else None
             except Exception:
                 logger.warning("Plan: adding a calendar event failed", exc_info=True)
+                event_id = None
+            if event_id:
+                ids.append(str(event_id))
+            else:
+                failed += 1
+        for event in plan.get("skipped") or []:  # the lecture stays on its read-only calendar: mark it skipped on yours
+            arguments = {"title": f"Skipped: {event['title']}", "start": _iso(day, event["start"]), "end": _iso(day, event["end"]),
+                         "description": MARKER + " You said you'd skip this.", "confirm": True}
+            try:
+                result = tool.execute("create_event", arguments)
+                event_id = ((result.data or {}).get("event") or {}).get("id") if result.success else None
+            except Exception:
+                logger.warning("Plan: marking a skipped event failed", exc_info=True)
                 event_id = None
             if event_id:
                 ids.append(str(event_id))
@@ -593,6 +620,16 @@ def _minute_of(value: str, day: date) -> int:
     if moment.tzinfo is not None:
         moment = moment.astimezone().replace(tzinfo=None)  # the process's local time (MIKI_TIMEZONE on the server)
     return int((moment - datetime.combine(day, dtime.min)).total_seconds() // 60)
+
+
+def _skip_matches(term: str, title: str, start: int) -> bool:
+    """Does "skip ``term``" mean this event? A "HH:MM" term matches the start time; otherwise every word of the term
+    must be in the title ("lecture" matches "MATH101 Lecture"; "linear algebra" matches "Linear Algebra Lecture")."""
+    at = req.clock(term)
+    if at is not None:
+        return at == start
+    words = term.lower().split()
+    return bool(words) and all(word in title.lower() for word in words)
 
 
 def _iso(day: date, minute: int) -> str:

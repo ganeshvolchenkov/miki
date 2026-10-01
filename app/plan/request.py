@@ -20,6 +20,7 @@ MAX_TITLE = 60
 MAX_PLACE = 30
 MAX_STUDY_MINUTES = 16 * 60
 MAX_FACTS = 20
+MAX_SKIPS = 8
 _PLACE = re.compile(r"[a-z0-9][a-z0-9 '&-]*")
 _CLOCK = re.compile(r"(\d{1,2})[:.h](\d{2})")
 DEFAULT_TITLES = {STUDY: "Study", MEAL: "Meal", ACTIVITY: "Activity", FIXED: "Appointment"}
@@ -63,6 +64,7 @@ class Request:
     start_place: str | None = None
     study_place: str | None = None
     facts: Facts = field(default_factory=Facts)
+    skip: list[str] = field(default_factory=list)  # calendar events you won't go to: words from the title, or a "HH:MM" start
 
 
 # ------------------------------------------------------------------------------------------------ checking fields
@@ -170,7 +172,20 @@ def parse(raw: Any) -> Request | None:
         start_place=place_name(raw.get("start_place")),
         study_place=place_name(raw.get("study_place")),
         facts=_facts(raw.get("learn")),
+        skip=_skip(raw.get("skip")),
     )
+
+
+def _skip(raw: Any) -> list[str]:
+    """Which calendar events to skip: short lowercase title words ("linear algebra lecture", "lecture") or a "HH:MM" start."""
+    if not isinstance(raw, list):
+        return []
+    terms: list[str] = []
+    for item in raw[:MAX_SKIPS]:
+        text = re.sub(r"\s+", " ", item).strip().lower() if isinstance(item, str) else ""
+        if 2 <= len(text) <= MAX_TITLE and text not in terms:
+            terms.append(text)
+    return terms
 
 
 def to_json(request: Request) -> dict[str, Any]:
@@ -195,7 +210,7 @@ def to_json(request: Request) -> dict[str, Any]:
             item["ends_day"] = True
         items.append(item)
     return {"day": "tomorrow" if request.day_offset else "today", "start": hhmm(request.start), "start_place": request.start_place,
-            "study_place": request.study_place, "items": items}
+            "study_place": request.study_place, "skip": request.skip, "items": items}
 
 
 # ------------------------------------------------------------------------------------------------ asking the AI
@@ -209,6 +224,7 @@ Reply ONLY with JSON in this shape:
  "start": "HH:MM" or null,
  "start_place": place or null,
  "study_place": place or null,
+ "skip": [],
  "items": [
   {{"kind": "study", "title": "Linear algebra", "minutes": 300}},
   {{"kind": "meal", "title": "Lunch", "minutes": 50, "during_study": true, "at": null}},
@@ -226,7 +242,8 @@ Rules:
 - Every activity, meal and appointment in the message must be an item. Never drop one, never turn one into another kind (the gym is never "study").
 - start_place / study_place: only if they say where they are now / where they will study today.
 - "learn": only facts they state as generally true (travel times, how long something usually takes, where they usually study). Otherwise {{}}.
-- If a previous plan is shown, the message may change it ("move the gym to the morning", "only 2 hours of calculus"): return the whole updated day. If it describes a completely new day, ignore the previous plan.
+- "skip": calendar events they say they will NOT attend ("skip the lecture", "I'm skipping linear algebra", "skip my 10am"). Each entry is short lowercase words from the event's title ("lecture", "linear algebra"), or a start time "HH:MM" for "the 10am". Skipping is not an item: a skipped lecture is not studying. Otherwise [].
+- If a previous plan is shown (keep its "skip" list unless they take it back), the message may change it ("move the gym to the morning", "only 2 hours of calculus"): return the whole updated day. If it describes a completely new day, ignore the previous plan.
 - If the message only states facts (nothing to plan), return "items": [] with the facts in "learn"."""
 
 

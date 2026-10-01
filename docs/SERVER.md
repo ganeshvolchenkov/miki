@@ -56,6 +56,7 @@ must never run a second brain; `app/main.py` and `app/headless.py` enforce that 
 | Dashboard window | laptop | `app/interfaces/remote_gui.py` (thin; imports no brain) + `app/interfaces/web/` (HTML/JS/CSS) |
 | Focus timeline, recap, habits memory | server | `app/focus/service.py`, `session.py`, `recap.py`, `habits.py`, `memory.py` |
 | Day planner `/plan` (reader, scheduler, calendar, nudges) | server | `app/plan/` (`request.py` AI → checked JSON, `schedule.py` pure scheduler, `service.py`, `store.py`) |
+| Mail + photo reader (dates → calendar, tasks → texts/reminders, facts → memory) | server | `app/inbox/` (`findings.py` checks the AI's JSON, `reader.py` prompts + vision OCR, `service.py` acts, undo, reminders); wired in `PhoneService`; photos handled in `bot.py` `_on_photo`, undo button `ib:undo:<batch>` |
 | Focus screen work (windows, bouncer, pet) | laptop | `app/focus/desk.py`, `guard.py`, `chrome.py`, `winapi.py`, `pet.py`, `pet_host.py`, run by `app/hands/agent.py` |
 | The link | both | `app/link/protocol.py`, `hub.py` (server), `client.py` + `tunnel.py` (laptop), `remote.py` (server-side stand-ins) |
 | Obsidian vault | server (synced to laptop by Syncthing) | `app/memory/obsidian.py`, `brain.py` |
@@ -155,6 +156,7 @@ Every setting the code reads (grep `os.getenv` to refresh this list):
 | Memory / RAG | `OBSIDIAN_VAULT_PATH` (must exist, `obsidian/` on the server), `MIKI_MEMORY_INTELLIGENCE_ENABLED`, `MIKI_MEMORY_CANDIDATE_THRESHOLD`, `MIKI_MEMORY_CONFIDENT_THRESHOLD`, `MIKI_RAG_ENABLED`, `MIKI_RAG_TOP_K`, `MIKI_RAG_CHUNK_SIZE`, `MIKI_RAG_CHUNK_OVERLAP`, `MIKI_RAG_SIMILARITY_THRESHOLD`, `MIKI_RAG_INDEX_PATH` |
 | Phone | `TELEGRAM_BOT_TOKEN`, `MIKI_PHONE`, `MIKI_QUIET_HOURS` (`23:00-08:00`), `MIKI_MAIL_WATCH_SECONDS`, `MIKI_MAIL_TRIAGE` |
 | Tools | `MIKI_TOOLS_ENABLED`, `MIKI_CALENDAR_ENABLED`, `MIKI_CALENDAR_REQUIRE_CREATE_CONFIRMATION`, `MIKI_GOOGLE_CALENDAR_ID`, `MIKI_GOOGLE_CREDENTIALS_PATH`, `MIKI_GOOGLE_TOKEN_PATH`, `MIKI_GOOGLE_DRIVE_FOLDER_NAME`, `MIKI_GOOGLE_MAPS_API_KEY`, `MIKI_WEATHER_ENABLED`, `WEATHER_PROVIDER`, `WEATHER_API_KEY`, `WEATHER_DEFAULT_LOCATION`, `WEATHER_UNITS`, `WEATHER_CACHE_TTL_SECONDS` |
+| Inbox | `MIKI_INBOX` (on), `MIKI_INBOX_MODEL` (`gpt-4.1-mini`: reads mail and photos) |
 | Plan | `MIKI_PLAN` (on), `MIKI_PLAN_MODEL` (`gpt-4.1-mini`: reads requests; nano was tested and drops items) |
 | Focus (server reads the timing ones, laptop reads the screen ones) | `MIKI_FOCUS`, `MIKI_FOCUS_MINUTES`, `MIKI_FOCUS_BREAK_MINUTES`, `MIKI_FOCUS_RECAP_TIME`, `MIKI_FOCUS_BAN` (server), `MIKI_FOCUS_SCREEN1_URL`, `MIKI_FOCUS_SCREEN2_URL`, `MIKI_FOCUS_SWAP_SCREENS`, `MIKI_CHROME_PATH`, `MIKI_FOCUS_PORT` (laptop) |
 
@@ -177,6 +179,7 @@ Every setting the code reads (grep `os.getenv` to refresh this list):
 | `data/mail_triage.json`, `data/mail_dismissed.json` | triage cache, dismissed/snoozed mail | |
 | `data/focus.json` (+ `.bak`, `.corrupt`), `data/focus_log.jsonl` | focus rounds, stats, bans; append-only round log | move from laptop once with `scp` |
 | `data/plan.json` (+ `.corrupt`) | `/plan`: your places (travel times, usual lengths, study place), the draft, the active plan (its calendar event ids, which nudges went out) | Atomic writes. Deleting it forgets the places. Miki's calendar events carry "Planned by Miki (/plan)." in their description. |
+| `data/inbox.json` (+ `.corrupt`) | read mail ids, undo batches (calendar event ids Miki added on its own), pending reminders, notices held back by quiet hours | Atomic writes. Events Miki adds carry "Added by Miki from …" in their description. |
 | `data/google_calendar/credentials.json`, `token.json` | Google OAuth | Consent screen must be **published**, or the refresh token dies after 7 days. |
 | `data/backups/` | vault backups before graph rebuilds | |
 | `data/phone.log` | the brain's app log (server) | INFO level |
@@ -317,8 +320,12 @@ second bot poller against the real token.
   checked fixes. "Looks good" writes one calendar event per block (`confirm=True`: the button *is* the
   confirmation) and the `miki-plan` clock (20 s tick, named lock `MikiPlan`) sends nudges through
   `PhoneNotifier.send(direct=True)` keyed `plan:<day>:<created>:<block>`. Phone callbacks `pl:*`.
-- Parked feature ideas (owner-approved direction): calendar-event nudges beyond `/plan`, mail "draft a reply" button (Gmail draft only, never send), weekly wrap-up, photo → event/memory
-  on Telegram, `/health` + off-site vault backup + OAuth-expiry warning. Memory work still open:
+- **Inbox reader** (built 2026-10-01, `app/inbox/`): the owner chose *automatic* calendar adds, so the guardrails live in code:
+  email/photo text is untrusted, the AI only returns JSON that `findings.parse` checks (future dates only, https links only,
+  ≤10 items, ≤8 events per source); Miki's only actions are add a tagged calendar event (deduped, one undoable batch), text the
+  owner, remember a fact. It never sends mail, opens links, signs up or deletes anything it didn't add. The first mail pass
+  only records what's already in the inbox (no flood). Notices wait out quiet hours in `data/inbox.json`'s outbox.
+- Parked feature ideas (owner-approved direction): calendar-event nudges beyond `/plan`, mail "draft a reply" button (Gmail draft only, never send), weekly wrap-up, `/health` + off-site vault backup + OAuth-expiry warning. Memory work still open:
   contradiction history, recall cache, opt-in mining of calendar/mail.
 
 ---

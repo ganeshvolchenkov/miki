@@ -388,6 +388,16 @@ def plan_nudge_buttons(block: int | None, minutes: int) -> Buttons | None:
     return [[_b(f"▶️ Focus {minutes} min", f"pl:fc:{block}")]] if block is not None else None
 
 
+def inbox_buttons(batch: str, link: str = "") -> Buttons | None:
+    """Under something Miki did on its own from mail or a photo: undo it in one tap, or open the link it found."""
+    row: list[dict[str, str]] = []
+    if link.startswith("https://"):
+        row.append({"text": "🔗 Open link", "url": link})
+    if batch:
+        row.append(_b("↩️ Undo", f"ib:undo:{batch}"))
+    return [row] if row else None
+
+
 def focus_stop_confirm() -> Screen:
     return Screen("⏹ <b>End focus early?</b>\nYou still have time left.", [[_b("✅ Yes, end it", "fc:stopy"), _b("💪 Keep going", "fc:status")]])
 

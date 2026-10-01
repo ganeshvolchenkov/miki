@@ -276,6 +276,14 @@ class MikiCore:
         self._record_memory_event(memory)
         return memory
 
+    def reset_conversation(self) -> int:
+        """``/delete``: forget the conversation so far (the model starts with an empty history). Long-term memories stay.
+        Returns how many messages were cleared."""
+        cleared = self.conversation_store.reset()
+        self.pending_tool_action = None  # a half-finished "shall I add it?" belongs to the old conversation
+        self.last_memories = []
+        return cleared
+
     def remember(self, text: str) -> list:
         """Explicitly store what the user asked to remember (may yield several memories)."""
         if self.memory_manager is None:

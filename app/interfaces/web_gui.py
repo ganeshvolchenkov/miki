@@ -294,6 +294,15 @@ class WebApi:
         self._say(turn.text)
         self._toast(turn.memories)
 
+    def _command_delete(self) -> None:
+        """/delete: like Claude's /reset. A fresh conversation (memories stay) and an empty chat log."""
+        if self._interview is not None and self._interview.active:
+            self._interview.stop()
+        cleared = self._core.reset_conversation()
+        self._js("(function(){var log=document.getElementById('chat-log'); if(log){log.replaceChildren();}})()")
+        self._system(f"Fresh start. I cleared our conversation ({cleared} messages). What I've learned about you is kept."
+                     if cleared else "Fresh start. What I've learned about you is kept.")
+
     def _start_interview(self) -> None:
         self._say(self._interview.start().text)
 
@@ -320,6 +329,8 @@ class WebApi:
                 self._run_background(self._start_interview)
         elif command == "mail":
             self._run_background(self._mail_command)
+        elif command in {"delete", "reset"}:
+            self._command_delete()
         elif command == "phone":
             self._command_phone(argument)
         elif command == "focus":
@@ -346,6 +357,7 @@ class WebApi:
                 "/remember <fact>    store something on purpose\n"
                 "/memory [word]      what I remember (or search it)\n"
                 "/forget <word|id>   delete a memory\n"
+                "/delete             start a fresh conversation (like /reset); memories are kept\n"
                 "/mail               the emails that need your attention, and why\n"
                 "/phone              link Miki to your phone (Telegram)\n"
                 "/focus [1 hour|50 min, finish lecture 6|stop] study mode: Gemini + Claude on your screens, distractions blocked, a break, a daily recap (also /focus today, /focus habits)\n"

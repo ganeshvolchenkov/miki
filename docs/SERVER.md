@@ -310,6 +310,9 @@ second bot poller against the real token.
   handler delays later ones: keep them short or thread them.
 - **Anything the dashboard page needs** → the server-side `WebApi` pushes JS as it always did. A new
   page → Python call must be added to `ThinApi`, `DASHBOARD_CALLS`, and the local `WebApi`.
+- **`/delete`** (alias `/reset`, phone + dashboard; the CLI's own `/delete <id>` still removes a memory): `MikiCore.reset_conversation()` closes the
+  chat session and starts an empty one (the old file stays on disk, memories are untouched); on Telegram it also deletes every message the bot
+  tracked (`PhoneState.messages`, only those under 48 h old can go).
 - **Slash commands** exist in three places: dashboard (`WebApi._handle_command`), phone
   (`bot.py` + `backend.command`), and CLI. Keep them consistent.
 - **Tools** (calendar/mail/drive/maps/weather) live in `app/tools/<name>/` with `wiring.py`; anything

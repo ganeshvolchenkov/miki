@@ -29,6 +29,10 @@ class ConversationStore:
     def close_session(self) -> None:
         raise NotImplementedError
 
+    def reset(self) -> int:
+        """Start a fresh, empty conversation. Returns how many messages the old one had."""
+        raise NotImplementedError
+
 
 class JSONConversationStore(ConversationStore):
     """Simple JSON-backed session store for the initial version."""
@@ -99,6 +103,19 @@ class JSONConversationStore(ConversationStore):
             data["ended_at"] = datetime.utcnow().isoformat(timespec="seconds")
             self._save_data(data)
             logger.info("Closed session %s", self.session_id)
+
+    def reset(self) -> int:
+        """A clean slate for what the model sees. The old session is closed, not erased: it stays on disk (and in the
+        memory index), so what Miki already learned from it is untouched."""
+        count = len(self.read_messages())
+        self.close_session()
+        self.date_dir.mkdir(parents=True, exist_ok=True)
+        self.session_id = f"session_{len(list(self.date_dir.glob('session_*.json'))) + 1:03d}"
+        self.file_path = self.date_dir / f"{self.session_id}.json"
+        self._save_data({"session_id": self.session_id, "started_at": datetime.utcnow().isoformat(timespec="seconds"),
+                         "ended_at": None, "messages": []})
+        logger.info("Conversation reset: %d messages archived, new session %s", count, self.session_id)
+        return count
 
     def _load_data(self) -> dict[str, Any]:
         if not self.file_path.exists():

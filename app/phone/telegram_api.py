@@ -124,6 +124,15 @@ class TelegramApi:
         except Exception:
             logger.debug("on_sent failed", exc_info=True)
 
+    def delete_messages(self, chat_id: int, message_ids: list[int]) -> bool:
+        """Delete up to 100 messages in one call. False if Telegram refuses the batch."""
+        try:
+            self.call("deleteMessages", {"chat_id": chat_id, "message_ids": message_ids[:100]}, timeout=20)
+            return True
+        except TelegramError as exc:
+            logger.debug("deleteMessages failed: %s", exc.description)
+            return False
+
     def delete_message(self, chat_id: int, message_id: int) -> bool:
         """Delete one message. False if Telegram refuses (already gone, or older than the 48 hours bots may delete)."""
         try:

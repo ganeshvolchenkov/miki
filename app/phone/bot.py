@@ -49,6 +49,7 @@ COMMANDS = [
     ("brief", "Your day in one message"),
     ("focus", "Start a focus session"),
     ("plan", "Plan your day in plain English"),
+    ("delete", "Start a fresh conversation (clears this chat)"),
     ("memory", "What I remember about you"),
     ("profile", "Who I think you are"),
     ("interview", "Let me get to know you"),
@@ -258,6 +259,8 @@ class PhoneBot:
             self._focus_command(chat_id, argument)
         elif command == "plan":
             self._plan_command(chat_id, argument)
+        elif command in {"delete", "reset"}:
+            self._delete_command(chat_id)
         elif command == "unlink":
             self.state.unpair()
             self.hooks.on_state()
@@ -276,6 +279,34 @@ class PhoneBot:
                 self._send(chat_id, self._backend_text(command, argument), mode="plain")
         else:
             self._send(chat_id, f"I don't know /{command}. Try /help.", mode="plain")
+
+    def _delete_command(self, chat_id: int) -> None:
+        """/delete: like Claude's /reset. A new conversation (memories stay), and the chat is wiped of what Miki can delete."""
+        try:
+            with self._typing(chat_id):
+                cleared = self.backend.reset_conversation()
+        except Exception:
+            logger.exception("/delete failed")
+            self._send(chat_id, "I couldn't reset the conversation. Try again in a moment.", mode="plain")
+            return
+        self._replies.clear()
+        tracked = self.state.messages_older_than(0, limit=10_000)
+        self.state.forget_messages(set(tracked))
+        threading.Thread(target=self._wipe_chat, args=(tracked,), name="miki-wipe-chat", daemon=True).start()
+        note = f"Fresh start. I cleared our conversation ({cleared} messages). What I've learned about you is kept." if cleared else             "Fresh start. We had nothing in this conversation yet. What I've learned about you is kept."
+        self._send(chat_id, "🧹 " + note, mode="plain")
+
+    def _wipe_chat(self, tracked: list[tuple[int, int]]) -> None:
+        """Delete what the bot saw or sent (Telegram only lets it delete messages under 48 hours old), 100 at a time."""
+        by_chat: dict[int, list[int]] = {}
+        for chat, message in tracked:
+            by_chat.setdefault(chat, []).append(message)
+        for chat, ids in by_chat.items():
+            for start in range(0, len(ids), 100):
+                batch = ids[start:start + 100]
+                if not self.api.delete_messages(chat, batch):
+                    for message_id in batch:  # one stale id makes Telegram refuse the whole batch: go one by one
+                        self.api.delete_message(chat, message_id)
 
     # ------------------------------------------------------------------ focus mode
     def _focus_command(self, chat_id: int, argument: str) -> None:

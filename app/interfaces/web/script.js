@@ -17,6 +17,7 @@ const COMMANDS = [
     { cmd: '/remember', desc: 'Store something about you on purpose' },
     { cmd: '/memory', desc: 'What I remember (add a word to search)' },
     { cmd: '/forget', desc: 'Delete a memory (text or id)' },
+    { cmd: '/delete', desc: 'Start a fresh conversation (like /reset); memories are kept' },
     { cmd: '/brain', desc: 'How connected my memory is (rebuild | learn | sleep | open)' },
     { cmd: '/model', desc: 'Switch the OpenAI model (cheaper models cost less)' },
     { cmd: '/help', desc: 'Show available commands' },

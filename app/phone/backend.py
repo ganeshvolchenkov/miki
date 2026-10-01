@@ -88,6 +88,13 @@ class CoreBackend:
         pending = getattr(self.core, "pending_tool_action", None) is not None
         return ChatReply(response or "…", mc.toast_payload(learned), needs_confirmation=pending)
 
+    def reset_conversation(self) -> int:
+        """``/delete``: a fresh conversation (memories are kept). Waits for a reply in progress, so nothing lands in the old one."""
+        with self.lock:
+            if self.interview_active:
+                self.interview_stop()
+            return int(self.core.reset_conversation())
+
     # ------------------------------------------------------------------ commands
     def command(self, name: str, argument: str) -> str | None:
         """Text for a known command, or None if it isn't one."""

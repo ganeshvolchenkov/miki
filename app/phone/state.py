@@ -23,6 +23,7 @@ CODE_TTL_SECONDS = 10 * 60
 MAX_WRONG_CODES = 5
 LOCKOUT_SECONDS = 15 * 60
 NOTIFIED_RETENTION_DAYS = 30
+MAX_TRACKED_MESSAGES = 3000
 
 
 DEFAULT_PREFS: dict[str, Any] = {
@@ -150,6 +151,26 @@ class PhoneState:
             notified[key] = time.time()
             cutoff = time.time() - NOTIFIED_RETENTION_DAYS * 86400
             self._data["notified"] = {k: v for k, v in notified.items() if v >= cutoff}
+            self._save()
+
+    # ------------------------------------------------------------------ the chat's own tidy-up
+    def track_message(self, chat_id: int, message_id: int) -> None:
+        """Remember a message (sent or received) so it can be deleted once it's a day old."""
+        with self._lock:
+            log = self._data.setdefault("messages", [])
+            log.append([int(chat_id), int(message_id), time.time()])
+            del log[:-MAX_TRACKED_MESSAGES]
+            self._save()
+
+    def messages_older_than(self, seconds: float, limit: int = 50) -> list[tuple[int, int]]:
+        """(chat id, message id) of tracked messages at least ``seconds`` old, oldest first."""
+        cutoff = time.time() - seconds
+        with self._lock:
+            return [(c, m) for c, m, t in self._data.get("messages", []) if t <= cutoff][:limit]
+
+    def forget_messages(self, ids: set[tuple[int, int]]) -> None:
+        with self._lock:
+            self._data["messages"] = [row for row in self._data.get("messages", []) if (row[0], row[1]) not in ids]
             self._save()
 
     def flag(self, name: str) -> bool:

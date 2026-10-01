@@ -52,6 +52,7 @@ class TelegramApi:
         self._token = token
         self._opener = opener or _default_opener
         self._base = base.rstrip("/")
+        self.on_sent: Callable[[int, int], None] | None = None  # (chat id, message id) of every message the bot sends
 
     # ---------------------------------------------------------------- transport
     def _scrub(self, text: str) -> str:
@@ -111,7 +112,26 @@ class TelegramApi:
             params["reply_markup"] = {"inline_keyboard": buttons}
         elif reply_markup:
             params["reply_markup"] = reply_markup
-        return self.call("sendMessage", params)
+        sent = self.call("sendMessage", params)
+        self._sent(chat_id, sent)
+        return sent
+
+    def _sent(self, chat_id: int, message: Any) -> None:
+        """Tell the cleanup log about a message just sent (never lets that get in the way of sending)."""
+        try:
+            if self.on_sent is not None and isinstance(message, dict) and message.get("message_id") is not None:
+                self.on_sent(chat_id, int(message["message_id"]))
+        except Exception:
+            logger.debug("on_sent failed", exc_info=True)
+
+    def delete_message(self, chat_id: int, message_id: int) -> bool:
+        """Delete one message. False if Telegram refuses (already gone, or older than the 48 hours bots may delete)."""
+        try:
+            self.call("deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=10)
+            return True
+        except TelegramError as exc:
+            logger.debug("deleteMessage failed: %s", exc.description)
+            return False
 
     def edit_message(
         self,
@@ -179,7 +199,9 @@ class TelegramApi:
             raise TelegramError(self._scrub(f"Network error: {exc}"), status=0) from None
         if not payload.get("ok"):
             raise TelegramError(self._scrub(str(payload.get("description", "Telegram returned an error"))), status=int(payload.get("error_code", 0)))
-        return payload.get("result") or {}
+        result = payload.get("result") or {}
+        self._sent(chat_id, result)
+        return result
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         try:

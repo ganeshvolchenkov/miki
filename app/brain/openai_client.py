@@ -22,7 +22,9 @@ class OpenAIClient:
         self.client = client or OpenAI(api_key=api_key)
         self.model = model
 
-    def generate_response(self, user_input: str, system_prompt: str, history: Sequence[dict[str, str]] | None = None) -> str:
+    def generate_response(self, user_input: str, system_prompt: str, history: Sequence[dict[str, str]] | None = None,
+                          temperature: float | None = None) -> str:
+        """``temperature=0`` makes a reading task (JSON out) repeatable instead of creative."""
         messages = [{"role": "system", "content": system_prompt}]
 
         if history:
@@ -36,9 +38,11 @@ class OpenAIClient:
         logger.info("Calling OpenAI model=%s with %d messages", self.model, len(messages))
 
         try:
+            extra = {} if temperature is None else {"temperature": temperature}
             response = self.client.responses.create(
                 model=self.model,
                 input=messages,
+                **extra,
             )
         except Exception:
             logger.exception("OpenAI API request failed")

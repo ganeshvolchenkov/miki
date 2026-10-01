@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 BOT_LOCK_NAME = "MikiPhoneBot"
 DEFAULT_WATCH_SECONDS = 300
+DEFAULT_CLEANUP_HOURS = 24.0  # the chat with Miki keeps a day of messages; older ones are deleted
+PURGE_BATCH = 50
+
+
+def _hours(value: str | None, default: float) -> float:
+    try:
+        return max(0.0, float(value)) if value not in (None, "") else default
+    except ValueError:
+        return default
 
 
 @dataclass
@@ -80,6 +89,8 @@ class PhoneService:
         if self.inbox is not None:
             self.inbox.add_listener(self._inbox_notice)
         self._watch_seconds = float(os.getenv("MIKI_MAIL_WATCH_SECONDS", "") or watch_seconds)
+        self.cleanup_hours = _hours(os.getenv("MIKI_PHONE_CLEANUP_HOURS"), DEFAULT_CLEANUP_HOURS)  # 0 = never delete anything
+        self.api.on_sent = self.state.track_message
         self._stop = threading.Event()
         self._owns_bot = False
 
@@ -117,12 +128,29 @@ class PhoneService:
                     except Exception:
                         logger.debug("Mail watch cycle failed", exc_info=True)
                 self.send_brief_if_due()
+                self.purge_old_messages()
                 if self.inbox is not None:
                     try:
                         self.inbox.tick()
                     except Exception:
                         logger.exception("Inbox tick failed")
             self._stop.wait(min(60.0, self._watch_seconds))
+
+    def purge_old_messages(self) -> int:
+        """Delete messages (yours and Miki's) once they are ``cleanup_hours`` old, so the chat doesn't pile up.
+
+        Telegram only lets a bot delete messages younger than 48 hours; anything older it refuses, and is dropped from the
+        log anyway (nothing to retry). Only messages this bot saw or sent are touched, never other chats. Returns how many went."""
+        if self.cleanup_hours <= 0 or not self.state.is_paired:
+            return 0
+        old = self.state.messages_older_than(self.cleanup_hours * 3600, PURGE_BATCH)
+        deleted = 0
+        for chat_id, message_id in old:
+            if self.api.delete_message(chat_id, message_id):
+                deleted += 1
+        if old:
+            self.state.forget_messages(set(old))
+        return deleted
 
     def send_brief_if_due(self, now: datetime | None = None) -> bool:
         """Push the morning brief once a day, from the chosen time until 3 hours later (never a stale one)."""

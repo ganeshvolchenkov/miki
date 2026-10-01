@@ -7,6 +7,7 @@ can produce a bad plan at worst (which you see before anything happens), never a
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ class Wish:
     ends_day: bool = False
     after_study: bool = False
     before_study: bool = False
+    estimate: int | None = None  # the AI's guess of how long it takes, used only when nothing better is known
 
 
 @dataclass
@@ -64,6 +66,7 @@ class Request:
     start_place: str | None = None
     study_place: str | None = None
     facts: Facts = field(default_factory=Facts)
+    skip_lunch: bool = False  # "no lunch": don't add one on a long study day
     skip: list[str] = field(default_factory=list)  # calendar events you won't go to: words from the title, or a "HH:MM" start
 
 
@@ -75,6 +78,17 @@ def clock(value: Any) -> int | None:
         return None
     hour, minute = int(match[1]), int(match[2])
     return hour * 60 + minute if 0 <= hour < 24 and 0 <= minute < 60 else None
+
+
+_MEALS = {"breakfast": "breakfast", "brunch": "breakfast", "lunch": "lunch", "dinner": "dinner", "supper": "dinner"}
+
+
+def meal_kind(title: str) -> str | None:
+    """"breakfast", "lunch" or "dinner" if the title is one of those meals (so they get sensible times and lengths)."""
+    for word in re.findall(r"[a-z]+", str(title).lower()):
+        if word in _MEALS:
+            return _MEALS[word]
+    return None
 
 
 def place_name(value: Any) -> str | None:
@@ -117,7 +131,10 @@ def _wish(raw: Any) -> Wish | None:
         ends_day=raw.get("ends_day") is True,
         after_study=str(raw.get("after", "")).strip().lower() == "study",
         before_study=str(raw.get("before", "")).strip().lower() == "study",
+        estimate=minutes(raw.get("estimate"), 5, 8 * 60),
     )
+    if wish.kind == ACTIVITY and meal_kind(wish.title):
+        wish.kind = MEAL  # "Dinner" is a meal even if it was read as an activity
     if wish.kind == STUDY:
         wish.place = wish.at = None  # study happens at the day's study place, in rounds
         wish.after_study = wish.before_study = False
@@ -125,6 +142,9 @@ def _wish(raw: Any) -> Wish | None:
         wish.kind = ACTIVITY  # "dinner with Sam" without a time is just something to fit in
     elif wish.at is not None and not wish.during_study:
         wish.kind = FIXED  # "gym at 6pm" is a time to keep
+    if (wish.kind in {MEAL, FIXED} and wish.place is None and meal_kind(wish.title) in {"breakfast", "dinner"}
+            and not re.search(r"(with|at|out|restaurant|party)", wish.title.lower())):
+        wish.place = "home"  # breakfast and dinner happen at home unless said otherwise
     wish.ends_day = wish.ends_day and wish.kind == FIXED
     return wish
 
@@ -173,6 +193,7 @@ def parse(raw: Any) -> Request | None:
         study_place=place_name(raw.get("study_place")),
         facts=_facts(raw.get("learn")),
         skip=_skip(raw.get("skip")),
+        skip_lunch=raw.get("skip_lunch") is True,
     )
 
 
@@ -196,6 +217,8 @@ def to_json(request: Request) -> dict[str, Any]:
     items = []
     for wish in request.wishes:
         item: dict[str, Any] = {"kind": wish.kind, "title": wish.title, "minutes": wish.minutes}
+        if wish.estimate is not None and wish.minutes is None:
+            item["estimate"] = wish.estimate
         for name in ("place", "at", "after", "before"):
             value = getattr(wish, name)
             if value is not None:
@@ -210,7 +233,7 @@ def to_json(request: Request) -> dict[str, Any]:
             item["ends_day"] = True
         items.append(item)
     return {"day": "tomorrow" if request.day_offset else "today", "start": hhmm(request.start), "start_place": request.start_place,
-            "study_place": request.study_place, "skip": request.skip, "items": items}
+            "study_place": request.study_place, "skip": request.skip, "skip_lunch": request.skip_lunch, "items": items}
 
 
 # ------------------------------------------------------------------------------------------------ asking the AI
@@ -225,26 +248,39 @@ Reply ONLY with JSON in this shape:
  "start_place": place or null,
  "study_place": place or null,
  "skip": [],
+ "skip_lunch": false,
  "items": [
   {{"kind": "study", "title": "Linear algebra", "minutes": 300}},
   {{"kind": "meal", "title": "Lunch", "minutes": 50, "during_study": true, "at": null}},
-  {{"kind": "activity", "title": "Gym", "place": "gym", "minutes": null, "after": null, "before": null}},
+  {{"kind": "activity", "title": "Gym", "place": "gym", "minutes": null, "estimate": 75, "after": null, "before": null}},
   {{"kind": "fixed", "title": "Dinner", "place": "home", "at": "20:00", "minutes": null, "ends_day": true}}
  ],
  "learn": {{"travel": [{{"from": "home", "to": "school", "minutes": 50}}], "durations": {{"gym": 75}}, "study_place": null}}}}
 Rules:
 - One study item per subject with its own minutes. "8 hours: 5 linear algebra, 3 calculus" is two items (300 and 180), never a third 480 one. Study without a subject: title "Study".
-- A meal or break taken in the middle of studying has "during_study": true.
+- "study" means schoolwork: studying, revising, homework, assignments, exam prep, reading for a course. Reading or learning for fun is an "activity" at home, not study.
+- NEVER make an item for relaxing, resting, free time, "chill", "do nothing", sleeping or "the rest of the day": the scheduler leaves free time by itself.
+- A meal or break taken in the middle of studying has "during_study": true. Lunch on a day with studying is during_study unless they give it a time.
 - "fixed" = something at a set time. "Home by 8 for dinner" is fixed, place "home", at "20:00", "ends_day": true (everything else happens before it). A bare "be home by 8" is the same with title "Home" and minutes 0.
-- minutes: null when they don't say how long. place: one short lowercase noun ("gym", "school", "home", "library"), or null if it can be done anywhere.
-- at/after/before/start: 24-hour "HH:MM", only when they say so ("gym in the evening" -> after "17:00"; "start at 9" -> start "09:00").
-  after/before can also be "study": "gym after studying" -> after "study"; "gym before I study" -> before "study".
+- "at X" is the exact time; "by X" / "before X" means finished by then ("before"). A bare hour is the sensible one for the activity: gym at 6 -> "18:00", lunch at 1 -> "13:00", breakfast at 8 -> "08:00", dinner at 7 -> "19:00".
+- Any time the person states ("gym at 6pm", "lunch at 1", "dinner at 7") goes in "at" as 24-hour "HH:MM". Never drop a stated time.
+- minutes: only when they say how long, else null. estimate: for anything without minutes, your best realistic guess of how long it takes in minutes (call mom 15, run 45, groceries 40, laundry 30, haircut 45, breakfast 30, lunch 45, dinner 60); a usual length from the list above wins, use it.
+- place: one short lowercase noun ("gym", "school", "home", "library"). Things done at home (running, reading for fun, cooking, laundry, calls) have place "home" unless they say otherwise; breakfast and dinner are at "home". Null only if it can be done anywhere.
+- after/before/start: 24-hour "HH:MM", only when they say so ("gym in the evening" -> after "17:00"; "start at 9" -> start "09:00").
+  after/before can also be "study": "gym after studying" / "study then gym" -> gym after "study"; "gym before I study" / "gym then study" -> gym before "study". "A then B" and "A before B" always mean A first: "study 2 hours before the gym" -> the gym is after "study".
 - Every activity, meal and appointment in the message must be an item. Never drop one, never turn one into another kind (the gym is never "study").
-- start_place / study_place: only if they say where they are now / where they will study today.
-- "learn": only facts they state as generally true (travel times, how long something usually takes, where they usually study). Otherwise {{}}.
+- start_place / study_place: ONLY if they say where they are now / where they will study today; otherwise null (even if a usual place is listed above). "I'm at the gym now" only sets start_place "gym": it is not an item to schedule.
+- "learn": only facts they state as generally true (travel times, how long something usually takes, where they usually study). Otherwise {{}}. Never repeat facts that are already listed above.
 - "skip": calendar events they say they will NOT attend ("skip the lecture", "I'm skipping linear algebra", "skip my 10am"). Each entry is short lowercase words from the event's title ("lecture", "linear algebra"), or a start time "HH:MM" for "the 10am". Skipping is not an item: a skipped lecture is not studying. Otherwise [].
+- "skip_lunch": true only if they say no lunch / skip lunch. "no gym", "no lunch" and "no X" are never a "skip" entry: "skip" is only for events already in their calendar.
 - If a previous plan is shown (keep its "skip" list unless they take it back), the message may change it ("move the gym to the morning", "only 2 hours of calculus"): return the whole updated day. If it describes a completely new day, ignore the previous plan.
-- If the message only states facts (nothing to plan), return "items": [] with the facts in "learn"."""
+- If the message only states facts (nothing to plan), return "items": [] with the facts in "learn".
+Examples (message -> items only):
+"gym at 6pm and study 2 hours before that" -> [{{"kind":"study","title":"Study","minutes":120}}, {{"kind":"activity","title":"Gym","place":"gym","at":"18:00","after":"study"}}]
+"study 4 hours at the library then go to the gym" -> study_place "library"; [{{"kind":"study","title":"Study","minutes":240}}, {{"kind":"activity","title":"Gym","place":"gym","after":"study"}}]
+"3 hours left to study, then dinner at 7 and I want to relax" -> [{{"kind":"study","title":"Study","minutes":180}}, {{"kind":"fixed","title":"Dinner","place":"home","at":"19:00"}}]
+"2 hours physics, lunch at 1, a run in the evening, call mom" -> [{{"kind":"study","title":"Physics","minutes":120}}, {{"kind":"meal","title":"Lunch","at":"13:00","estimate":45}}, {{"kind":"activity","title":"Run","place":"home","after":"17:00","estimate":45}}, {{"kind":"activity","title":"Call mom","estimate":15}}]
+"breakfast, study 5 hours, lunch, gym, dinner at 8 at home" -> [{{"kind":"meal","title":"Breakfast","place":"home","before":"study","estimate":30}}, {{"kind":"study","title":"Study","minutes":300}}, {{"kind":"meal","title":"Lunch","during_study":true,"estimate":45}}, {{"kind":"activity","title":"Gym","place":"gym"}}, {{"kind":"fixed","title":"Dinner","place":"home","at":"20:00","ends_day":true}}]"""
 
 
 def build_prompt(now: datetime, routes: str, durations: str, study_place: str, previous: dict[str, Any] | None) -> str:
@@ -256,8 +292,15 @@ def build_prompt(now: datetime, routes: str, durations: str, study_place: str, p
 def make_ai_reader(brain: object) -> Callable[[str, str], Any]:
     """``(message, system prompt) -> parsed JSON or None``, backed by Miki's brain (anything with ``generate_response``)."""
 
+    try:
+        steady = "temperature" in inspect.signature(brain.generate_response).parameters  # type: ignore[attr-defined]
+    except (TypeError, ValueError):
+        steady = False
+
     def ask(text: str, system_prompt: str) -> Any:
-        reply = brain.generate_response(user_input=text, system_prompt=system_prompt, history=None)  # type: ignore[attr-defined]
+        # reading a request is not a creative job: temperature 0 gives the same answer every time
+        extra = {"temperature": 0} if steady else {}
+        reply = brain.generate_response(user_input=text, system_prompt=system_prompt, history=None, **extra)  # type: ignore[attr-defined]
         start = (reply or "").find("{")
         if start < 0:
             return None

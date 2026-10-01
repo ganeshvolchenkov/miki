@@ -141,3 +141,58 @@ def test_gym_before_studying_comes_first():
 def test_empty_day():
     schedule = plan_day(Day([], 9 * H))
     assert schedule.blocks == [] and schedule.ok
+
+
+# ------------------------------------------------------------------------------------------------ common sense
+def lecture_day(start, tasks, busy, **kwargs):
+    return Day(tasks, start, study_place="school", routes=ROUTES, busy=busy, earliest=start, **kwargs)
+
+
+def test_a_lecture_is_at_school_so_the_trip_there_is_planned():
+    busy = [(10 * H, 12 * H, "Linear Algebra Lecture")]
+    schedule = plan_day(lecture_day(8 * H, [Task(ACTIVITY, "Gym", 75, place="gym")], busy))
+    assert schedule.ok
+    lecture = next(b for b in schedule.blocks if b.kind == BUSY)
+    before = schedule.blocks[schedule.blocks.index(lecture) - 1]
+    assert (lecture.start, lecture.end, lecture.place) == (10 * H, 12 * H, "school")
+    assert before.end <= lecture.start and (before.place == "school" or before.kind == FREE)
+    assert schedule.blocks[-1].place == "home"  # and the day still ends at home, travelling from school
+
+
+def test_being_late_for_a_lecture_is_said_out_loud():
+    busy = [(10 * H, 12 * H, "Lecture")]
+    day = lecture_day(9 * H + 30, [Task(STUDY, "Study", 60)], busy)
+    schedule = plan_day(day)
+    assert not schedule.ok and "late for lecture at 10:00" in schedule.problems[0]
+    assert any(text.startswith("Skip Lecture") for text, _ in ways_to_fit(day, schedule))
+
+
+def test_an_errand_between_two_classes_goes_back_to_school_in_time():
+    busy = [(10 * H, 11 * H, "Lecture"), (15 * H, 16 * H + 30, "Calculus Tutorial")]
+    schedule = plan_day(lecture_day(8 * H, [Task(ACTIVITY, "Gym", 75, place="gym")], busy))
+    assert schedule.ok
+    tutorial = next(b for b in schedule.blocks if b.title == "Calculus Tutorial")
+    assert tutorial.start == 15 * H and tutorial.place == "school"
+
+
+def test_an_event_that_is_not_a_class_has_no_place_and_adds_no_trip():
+    busy = [(14 * H, 15 * H, "Dentist")]
+    schedule = plan_day(lecture_day(13 * H, [Task(STUDY, "Study", 60)], busy))
+    assert schedule.ok and sum(b.minutes for b in schedule.blocks if b.kind == TRAVEL) == 100  # just there and back for the study
+
+
+def test_studying_is_not_split_around_an_errand_to_save_a_few_minutes():
+    routes = {route_key("home", "library"): 20, route_key("gym", "library"): 20, route_key("gym", "home"): 50}
+    day = Day([Task(STUDY, "Study", 240), Task(ACTIVITY, "Gym", 75, place="gym", after_study=True)], 7 * H, study_place="library", routes=routes)
+    schedule = plan_day(day)
+    studies = [b for b in schedule.blocks if b.kind in {STUDY, BREAK}]
+    assert all(b.end == nxt.start for b, nxt in zip(studies, studies[1:]))  # one unbroken session, then the gym
+
+
+def test_you_dont_set_off_early_to_wait_somewhere_for_hours():
+    day = Day([Task(STUDY, "Study", 120), Task(FIXED, "Gym", 75, place="gym", at=18 * H)], 7 * H, study_place="school", routes=ROUTES)
+    schedule = plan_day(day)
+    gym = next(b for b in schedule.blocks if b.title == "Gym")
+    trip = schedule.blocks[schedule.blocks.index(gym) - 1]
+    assert gym.start == 18 * H and trip.kind == TRAVEL and trip.end == 18 * H
+    assert not any(b.kind == TRAVEL and b.place == "gym" and b.start < 12 * H for b in schedule.blocks)

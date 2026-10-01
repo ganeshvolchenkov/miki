@@ -13,6 +13,7 @@ which changes would make the day fit.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, replace
 from itertools import permutations
 from typing import Any, Iterator
@@ -26,6 +27,10 @@ LUNCH_AT = 12 * 60 + 30  # lunch goes to the study break closest to this, unless
 DAY_END = 24 * 60
 SHOW_FREE = 15  # gaps shorter than this aren't shown as free time
 MAX_PERMUTED = 3  # with more errands than this, the order you said them in is kept (the search would get slow)
+LONG_WAIT = 90  # with this long to spare before something elsewhere, you go home first rather than wait where you are
+SPLIT_COST = 30  # splitting the study around an errand must save at least this much travel to be worth it
+# Calendar events with these words happen where you study (a lecture is at school): Miki plans the trip there.
+CLASS_WORDS = re.compile(r"lecture|tutorial|seminar|\bclass\b|\blab\b|practical|workshop|exam|tentamen|midterm|college|werkgroep|colloquium|toets|course", re.I)
 
 
 def hm(minute: int) -> str:
@@ -130,7 +135,10 @@ class Schedule:
 
 # ------------------------------------------------------------------------------------------------ laying one order out
 class _Layout:
-    """Walks through one order of the day, minute by minute, and notes everything that's late."""
+    """Walks through one order of the day, minute by minute, and notes everything that's late.
+
+    Calendar events are stops too: a lecture is at school, so a trip there is planned before it (and you can be late for it);
+    the day carries on from there. Other events (a dentist) have no known place: you are simply busy, wherever you are."""
 
     def __init__(self, day: Day) -> None:
         self.day = day
@@ -143,47 +151,114 @@ class _Layout:
         self.soft = 0  # how far things drift from when you'd like them (lunch at 12:30)
         self.guessed: list[tuple[str, str]] = []
         self.boundaries: list[int] = []  # when each study piece ends: where lunch can go
+        self.events = sorted((b0, b1, title) for b0, b1, title in day.busy if b1 > day.start)
+        self.done: set[int] = set()  # events already walked through
+        self.ended = False  # "home by 8 for dinner" has happened: nothing later is planned
+        self.shown: set[int] = set()  # the ones that got a block of their own in the timeline
 
-    def _clear(self, start: int, length: int) -> int:
-        """The earliest time from ``start`` when ``length`` minutes fit between the calendar's events."""
-        moved = True
-        while moved:
-            moved = False
-            for b0, b1, _ in self.day.busy:
-                if start < b1 and b0 < start + max(length, 1):
-                    start, moved = b1, True
-        return start
+    # ------------------------------------------------------------------ the calendar's events
+    def _event_place(self, title: str) -> str | None:
+        return self.day.study_place if CLASS_WORDS.search(title) else None
 
-    def _next_busy(self, t: int) -> tuple[int, int] | None:
-        upcoming = [(b0, b1) for b0, b1, _ in self.day.busy if b1 > t]
-        return min(upcoming) if upcoming else None
+    def _pending(self, start: int, end: int) -> int | None:
+        """The first event not yet walked through that overlaps [start, end)."""
+        end = max(end, start + 1)
+        for index, (b0, b1, _) in enumerate(self.events):
+            if index not in self.done and b0 < end and b1 > start:
+                return index
+        return None
+
+    def _next_event(self, t: int) -> int | None:
+        for index, (_, b1, _) in enumerate(self.events):
+            if index not in self.done and b1 > t:
+                return index
+        return None
+
+    def _lead(self, index: int) -> int:
+        """How long it takes to get from where you study to that event (0 when it's where you are, or has no place)."""
+        place = self._event_place(self.events[index][2])
+        return self.day.route(self.day.study_place, place)[0] if place else 0
+
+    def _attend(self, index: int) -> None:
+        """Be at an event: travel there if it has a place, wait for it, sit through it."""
+        b0, b1, title = self.events[index]
+        self.done.add(index)
+        place = self._event_place(title)
+        if b0 < self.day.start:  # already underway when the day starts: you're in it only if you're where it is
+            if place and place != self.place:
+                return  # (it isn't planned around or attended; the timeline still shows it)
+        elif place and place != self.place:
+            self._travel(place)
+        if self.t > b0 and b0 >= self.day.start:
+            behind = min(self.t - b0, b1 - b0)
+            self._is_late(behind, f"{span(behind)} late for {title.lower()} at {hm(b0)}")
+        start = max(self.t, b0)
+        self.blocks.append(Block(BUSY, title, start, max(start, b1), place or self.place))
+        self.shown.add(index)
+        self.t = max(self.t, b1)
+        if place:
+            self.place = place
 
     def _is_late(self, minutes: int, text: str) -> None:
         self.late += minutes
         self.problems.append(text)
 
-    def go(self, place: str | None) -> None:
-        """Travel as soon as the last thing is done (any spare time is spent where you're going, e.g. at home)."""
-        if not place or place == self.place:
-            return
+    # ------------------------------------------------------------------ moving and doing
+    def _travel(self, place: str) -> None:
         leg, known = self.day.route(self.place, place)
         if not known and route_key(self.place, place) not in self.guessed:
             self.guessed.append(route_key(self.place, place))
-        leave = self._clear(self.t, leg)
-        self.blocks.append(Block(TRAVEL, f"To {place}", leave, leave + leg, place))
-        self.t, self.place = leave + leg, place
+        self.blocks.append(Block(TRAVEL, f"To {place}", self.t, self.t + leg, place))
+        self.t, self.place = self.t + leg, place
         self.travel += leg
 
+    def go(self, place: str | None) -> None:
+        """Travel as soon as the last thing is done (any spare time is spent where you're going, e.g. at home).
+        If the trip would run into an event, the event comes first."""
+        while place and place != self.place:
+            leg, _ = self.day.route(self.place, place)
+            index = self._pending(self.t, self.t + leg)
+            if index is None:
+                self._travel(place)
+                return
+            self._attend(index)
+
+    def _wait_for(self, place: str, target: int) -> bool:
+        """Something is at ``target`` somewhere else: don't set off early to sit there for hours. Stay put (or, if the wait
+        is long, go home first) and leave just in time. True if an event had to be attended on the way (try again)."""
+        home = self.day.home
+        if place == home:
+            return False  # getting home early is fine: the spare time is spent at home
+        leg = self.day.route(self.place, place)[0]
+        if self.t + leg >= target:
+            return False
+        if self.place not in {home, place}:
+            via = self.day.route(self.place, home)[0] + self.day.route(home, place)[0]
+            if target - self.t - via >= LONG_WAIT:  # hours to spare: spend them at home, not at the school gate
+                self.go(home)
+                leg = self.day.route(home, place)[0]
+        leave = target - leg
+        index = self._pending(self.t, leave)
+        if index is not None:
+            self._attend(index)
+            return True
+        self.t = max(self.t, leave)
+        return False
+
     def task(self, task: Task) -> None:
-        place = task.place or self.place
-        if task.kind == FIXED:
+        while True:
+            place = task.place or self.place
+            target = task.at if task.kind == FIXED else task.after
+            if target and place != self.place and self._wait_for(place, target):
+                continue
             self.go(place)
-            if self.t > task.at:
-                self._is_late(self.t - task.at, f"{span(self.t - task.at)} late for {task.title.lower()} at {hm(task.at)}")
-            start = max(self.t, task.at)
-        else:
-            self.go(place)
-            start = self._clear(max(self.t, task.after or 0), task.minutes)
+            start = max(self.t, task.at) if task.kind == FIXED else max(self.t, task.after or 0)
+            index = self._pending(self.t, start + task.minutes)
+            if index is None:
+                break
+            self._attend(index)  # an event is in the way: it comes first, then this is tried again
+        if task.kind == FIXED and self.t > task.at:
+            self._is_late(self.t - task.at, f"{span(self.t - task.at)} late for {task.title.lower()} at {hm(task.at)}")
         end = start + task.minutes
         if task.before is not None and end > task.before:
             self._is_late(end - task.before, f"{task.title} would only finish at {hm(end)}, after {hm(task.before)}")
@@ -191,26 +266,32 @@ class _Layout:
             self.soft += abs(start - task.at) // 2
         self.blocks.append(Block(task.kind, task.title, start, end, place))
         self.t, self.place = end, place
+        self.ended = self.ended or task.ends_day
 
     def study(self, pieces: list[tuple[str, int]], lunch: Task | None, lunch_slot: int | None) -> None:
-        """Rounds of at most ``round_minutes``, a short break between them, the calendar's events left alone."""
-        self.go(self.day.study_place)
+        """Rounds of at most ``round_minutes``, a short break between them, the calendar's events attended."""
+        study_place = self.day.study_place
+        self.go(study_place)
         queue = [[subject, minutes] for subject, minutes in pieces if minutes > 0]
         while queue:
-            subject, left = queue[0]
-            busy = self._next_busy(self.t)
-            if busy and busy[0] <= self.t:  # something in the calendar right now: wait it out
-                self.t = busy[1]
+            index = self._pending(self.t, self.t + 1)
+            if index is not None:  # something in the calendar right now
+                self._attend(index)
+                self.go(study_place)
                 continue
+            subject, left = queue[0]
             chunk = min(self.day.round_minutes, left)
             if left - chunk < MIN_CHUNK:  # don't leave a 10-minute scrap for later
                 chunk = left
-            if busy and busy[0] < self.t + chunk:
-                room = busy[0] - self.t
-                if room < MIN_CHUNK:
-                    self.t = busy[1]
-                    continue
-                chunk = room
+            upcoming = self._next_event(self.t)
+            if upcoming is not None:
+                latest = self.events[upcoming][0] - self._lead(upcoming)  # the last moment you can be sitting here
+                if latest < self.t + chunk:
+                    if latest - self.t < MIN_CHUNK:
+                        self._attend(upcoming)
+                        self.go(study_place)
+                        continue
+                    chunk = latest - self.t
             self.blocks.append(Block(STUDY, subject, self.t, self.t + chunk, self.place))
             self.t += chunk
             queue[0][1] -= chunk
@@ -222,14 +303,17 @@ class _Layout:
                 self.task(lunch)  # lunch is the long break
             elif queue:
                 end = self.t + self.day.break_minutes
-                busy = self._next_busy(self.t)
-                if busy and busy[0] < end:
-                    end = max(self.t, busy[0])
+                upcoming = self._next_event(self.t)
+                if upcoming is not None:
+                    end = min(end, max(self.t, self.events[upcoming][0] - self._lead(upcoming)))
                 if end > self.t:
                     self.blocks.append(Block(BREAK, "Break", self.t, end, self.place))
                     self.t = end
 
     def finish(self) -> None:
+        if not self.ended:  # classes still to come today are part of the day (a tutorial at 3pm isn't "home by 2")
+            while (index := self._next_event(self.t)) is not None and self._event_place(self.events[index][2]):
+                self._attend(index)
         self.go(self.day.home)  # every day ends at home
         if self.t > DAY_END:
             self._is_late(self.t - DAY_END, f"the day would only end at {hm(self.t)}, after midnight")
@@ -312,11 +396,13 @@ def _lay(day: Day, order: tuple[Any, ...], k: int | None, rounds: list[tuple[str
     return layout
 
 
-def _decorate(blocks: list[Block], day: Day) -> list[Block]:
-    """Add what's already in the calendar and the free time in between, in time order."""
+def _decorate(layout: _Layout, day: Day) -> list[Block]:
+    """Add the calendar events the day wasn't planned through (underway at the start, or after the end) and the free
+    time in between, in time order."""
+    blocks = layout.blocks
     end = max((b.end for b in blocks), default=day.start)
-    timeline = sorted([*blocks, *(Block(BUSY, title, b0, b1) for b0, b1, title in day.busy if b1 > day.start and b0 < end)],
-                      key=lambda b: (b.start, b.end))
+    extra = [Block(BUSY, title, b0, b1) for index, (b0, b1, title) in enumerate(layout.events) if index not in layout.shown and b0 < end]
+    timeline = sorted([*blocks, *extra], key=lambda b: (b.start, b.end))
     result: list[Block] = []
     cursor = day.start
     for block in timeline:
@@ -341,13 +427,13 @@ def plan_day(day: Day) -> Schedule:
                 layout = _lay(day, order, k, rounds, lunch, slot)
             else:
                 layout = _lay(day, (*order, lunch), k, rounds, None, None)
-        score = (layout.late, layout.travel + layout.soft, layout.t, index)
+        score = (layout.late, layout.travel + layout.soft + (SPLIT_COST if k is not None else 0), layout.t, index)
         if best is None or score < best[0]:
             best = (score, layout)
     if best is None:  # nothing at all to do
         return Schedule([], end=day.start, end_place=day.start_place)
     layout = best[1]
-    return Schedule(_decorate(layout.blocks, day), layout.late, layout.problems, layout.travel, layout.guessed, layout.t, layout.place)
+    return Schedule(_decorate(layout, day), layout.late, layout.problems, layout.travel, layout.guessed, layout.t, layout.place)
 
 
 # ------------------------------------------------------------------------------------------------ when it doesn't fit
@@ -386,6 +472,9 @@ def ways_to_fit(day: Day, schedule: Schedule, limit: int = 3) -> list[tuple[str,
             tries.append((f"Make {task.title.lower()} 30 min", replace(day, tasks=shorter)))
     if day.study_place != day.home and total:
         tries.append((f"Study at {day.home} instead of {day.study_place}", replace(day, study_place=day.home)))
+    for event in day.busy:  # a class you could skip (say so with /plan skip the lecture)
+        if CLASS_WORDS.search(event[2]):
+            tries.append((f"Skip {event[2]}", replace(day, busy=[e for e in day.busy if e is not event])))
 
     found: list[tuple[str, Schedule]] = []
     for text, variant in tries:

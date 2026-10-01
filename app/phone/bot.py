@@ -196,6 +196,8 @@ class PhoneBot:
                 logger.warning("Ignored a message from an unlinked Telegram account")
             return
 
+        if message.get("message_id") is not None:
+            self.state.track_message(chat_id, int(message["message_id"]))  # so the tidy-up can delete it later
         if self._is_stale(message):
             self._skipped += 1
             return

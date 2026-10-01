@@ -28,7 +28,7 @@ from typing import Any, Callable
 from app.core import single_instance
 from app.plan import request as req
 from app.plan.schedule import (
-    ACTIVITY, BREAK, BUSY, DEFAULT_TRAVEL, FIXED, FREE, MEAL, STUDY, TRAVEL, Block, Day, Task, hm, plan_day, route_key, span,
+    ACTIVITY, BREAK, BUSY, DEFAULT_TRAVEL, FIXED, FREE, LUNCH_AT, MEAL, STUDY, TRAVEL, Block, Day, Task, hm, plan_day, route_key, span,
     ways_to_fit,
 )
 from app.plan.store import HOME, Book, PlanStore
@@ -42,6 +42,11 @@ LEAVE_LEAD = 5  # "time to leave" goes out this many minutes before the trip
 STALE_MINUTES = 10  # a nudge this late (Miki was off) is skipped, not sent
 LISTENER_WAIT_SECONDS = 2.0
 DEFAULT_LENGTHS = {STUDY: 60, MEAL: 45, ACTIVITY: 60, FIXED: 0}
+MEAL_LENGTHS = {"breakfast": 30, "lunch": 45, "dinner": 60}
+DINNER_AFTER = 17 * 60 + 30  # a dinner with no time isn't before this
+AUTO_LUNCH_STUDY = 4 * 60  # this much study (or more) starting before lunchtime gets a lunch break even if you didn't ask
+AUTO_LUNCH_BEFORE = 13 * 60
+EVENING = 17 * 60 + 30  # study that would start after this happens at home, not a trip away
 DEFAULT_DAY_START = 8 * 60  # a plan for tomorrow starts here unless you say otherwise
 EARLIEST_START = 5 * 60
 MARKER = "Planned by Miki (/plan)."  # in every calendar event Miki adds, so it never plans around its own blocks
@@ -261,25 +266,40 @@ class PlanService:
                 if learned:
                     return PlanReply(True, f"🧠 Noted: {learned}.")
                 return PlanReply(False, "I didn't find anything to plan there.\n" + USAGE)
-            plan = self._build(request, now)
+            plan = self._build(request, now, text, current[1] if current else None)
             self.store.put("draft", plan)
         text = plan_text(plan)
         if learned:
             text += f"\n🧠 Noted for next time: {learned}."
         return PlanReply(True, text, "draft")
 
-    def _task(self, wish: req.Wish, book: Book, notes: list[str]) -> Task:
+    def _task(self, wish: req.Wish, book: Book, notes: list[str], has_study: bool) -> Task:
+        meal = req.meal_kind(wish.title)
         length = wish.minutes
         if length is None:
             known = book.durations.get(req.place_name(wish.title) or "") or (book.durations.get(wish.place) if wish.place else None)
-            length = known if known is not None else DEFAULT_LENGTHS[wish.kind]
-            if known is None and wish.kind != FIXED:
-                name = wish.title.lower()
-                notes.append(f"I guessed {span(length)} for {name}. If that's wrong: /plan remember {name} takes 45 min")
-        return Task(wish.kind, wish.title, length, wish.place, wish.at, wish.after, wish.before, wish.during_study, wish.ends_day,
-                    wish.after_study, wish.before_study)
+            if known is not None:
+                length = known
+            elif wish.kind == FIXED and (meal is None or wish.ends_day):
+                length = 0  # "be home by 8": a moment, not a stretch of time
+            else:
+                length = wish.estimate or MEAL_LENGTHS.get(meal or "") or DEFAULT_LENGTHS[wish.kind]
+                if meal is None:
+                    name = wish.title.lower()
+                    notes.append(f"I guessed {span(length)} for {name}. If that's wrong: /plan remember {name} takes {length} min")
+        at, after, during, before_study = wish.at, wish.after, wish.during_study, wish.before_study
+        if wish.kind == MEAL and at is None and after is None and wish.before is None and not during and not before_study and not wish.after_study:
+            if meal == "breakfast":
+                before_study = True  # breakfast comes first
+            elif meal == "dinner":
+                after = DINNER_AFTER
+            elif has_study:
+                during = True  # lunch is the long break inside the study
+            else:
+                at = LUNCH_AT
+        return Task(wish.kind, wish.title, length, wish.place, at, after, wish.before, during, wish.ends_day, wish.after_study, before_study)
 
-    def _build(self, request: req.Request, now: datetime) -> dict[str, Any]:
+    def _build(self, request: req.Request, now: datetime, text: str = "", previous: dict[str, Any] | None = None) -> dict[str, Any]:
         day = now.date() + timedelta(days=request.day_offset)
         book = self.store.book()
         notes: list[str] = []
@@ -301,22 +321,45 @@ class PlanService:
             for term in request.skip:
                 if not any(_skip_matches(term, event["title"], event["start"]) for event in skipped):
                     notes.append(f"I couldn't find \"{term}\" in your calendar that day, so nothing was skipped for it.")
-        tasks = [self._task(w, book, notes) for w in request.wishes]
+        has_study = any(w.kind == STUDY for w in request.wishes)
+        tasks = [self._task(w, book, notes, has_study) for w in request.wishes]
+        study_total = sum(t.minutes for t in tasks if t.kind == STUDY)
+        if (study_total >= AUTO_LUNCH_STUDY and start < AUTO_LUNCH_BEFORE and not request.skip_lunch
+                and not any(req.meal_kind(t.title) == "lunch" for t in tasks)):
+            tasks.append(Task(MEAL, "Lunch", MEAL_LENGTHS["lunch"], during_study=True))
+            notes.append("I added a 45 min lunch to your study day. Say \"no lunch\" if you don't want it.")
         config = getattr(self.focus, "config", None)
-        plan_input = Day(
-            tasks, start, start_place, request.study_place or book.study_place or HOME, HOME,
-            round_minutes=int(getattr(config, "minutes", 60) or 60), break_minutes=int(getattr(config, "break_minutes", 5) or 5),
-            busy=busy, routes=dict(book.routes), earliest=earliest,
-        )
-        schedule = plan_day(plan_input)
+        rounds = dict(round_minutes=int(getattr(config, "minutes", 60) or 60), break_minutes=int(getattr(config, "break_minutes", 5) or 5))
+
+        def lay(place: str) -> tuple[Day, Any]:
+            plan = Day(tasks, start, start_place, place, HOME, busy=busy, routes=dict(book.routes), earliest=earliest, **rounds)
+            return plan, plan_day(plan)
+
+        usual = request.study_place or book.study_place or HOME
+        said = bool(request.study_place and request.study_place in text.lower()) or bool((previous or {}).get("study_fixed"))
+        plan_input, schedule = lay(usual)
+        if study_total and usual != HOME and not said:  # common sense: is the trip worth it?
+            home_input, home_schedule = lay(HOME)
+            first_study = next((b.start for b in schedule.blocks if b.kind == STUDY), None)
+            reason = None
+            if not schedule.ok and home_schedule.ok:
+                reason = f"studying at {usual} wouldn't fit your day"
+            elif schedule.ok and home_schedule.ok:
+                if schedule.travel - home_schedule.travel >= study_total:
+                    reason = f"going to {usual} for {span(study_total)} of study would cost {span(schedule.travel - home_schedule.travel)} of travel"
+                elif first_study is not None and first_study >= EVENING:
+                    reason = "it's evening"
+            if reason:
+                plan_input, schedule = home_input, home_schedule
+                notes.append(f"I kept your study at home: {reason}. Say \"study at {usual}\" if you'd rather go.")
         for a, b in schedule.guessed_routes:
             notes.append(f"I don't know how far {a} is from {b}, so I guessed {DEFAULT_TRAVEL} min. "
                          f"Tell me: /plan remember {a} to {b} is 25 min")
         return {
             "day": day.isoformat(), "created": round(self._clock(), 3), "status": "draft",
-            "request": req.to_json(request),
+            "request": req.to_json(request), "study_fixed": said,
             "blocks": [b.to_dict() for b in schedule.blocks],
-            "problems": schedule.problems, "ways": [text for text, _ in ways_to_fit(plan_input, schedule)], "notes": notes,
+            "problems": schedule.problems, "ways": [text_ for text_, _ in ways_to_fit(plan_input, schedule)], "notes": notes,
             "study_minutes": schedule.study_minutes, "travel": schedule.travel, "home_at": schedule.home_at,
             "skipped": skipped, "calendar_ids": [], "nudged": [],
         }
